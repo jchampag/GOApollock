@@ -1323,6 +1323,7 @@ Type objective_function<Type>::operator() ()
     loglik(23) += dnorm(log_slp2_srv6, Type(0.0),Type(2.0), true);
     loglik(23) += dnorm(inf2_srv6, Type(10.0),Type(3.0), true);
     objfun = -sum(loglik);
+    objfun +=jnll_dsem; // add DSEM likelihood
 
   REPORT(objfun);
   REPORT(styr);
