@@ -17,7 +17,7 @@ library(dplyr)
 ## devtools::install_github("afsc-assessments/GOApollock", ref='dev')
 library(GOApollock)
 library(readxl)
-theme_set(theme_bw())
+# theme_set(theme_bw())
 
 ##### DATA READING + FORMATTING #######
 
@@ -192,3 +192,81 @@ fit_assess_dsem$sd %>% mutate(version='dsem') %>%
 fit_assess_dsem$opt$objective;fit_usual_assess$opt$objective
 
 
+### TRY TO FIT ANOTHER DSEM INSIDE ASSESSMENT MODEL ####
+
+dat0_names <- dat0 %>% names();dat0_names
+var_of_interest2 <- c(3,9,10,12,13,15);dat0_names[var_of_interest2]
+
+
+## pad extra years on beginning of time series
+dat_int_dsem2 <- bind_rows(data.frame(Year=1970:1976), dat0[,-1]) %>%
+  select(all_of(var_of_interest2)) %>%
+  mutate(recdevs=NA) %>% relocate(recdevs)
+# quick check that we are matching assessment duration #
+dat_int_dsem2 %>% dim() # nyrs <- 54;stopifnot(length(dat_int_dsem$Year)==nyrs)
+
+# plotting tentative
+pairs(dat_int_dsem2[,-1], upper.panel=NULL)
+
+## prepare data using dsem package
+# dat0_names[var_of_interest2]
+sem = "
+  # link, lag, param_name, start_value
+
+  #internal data relation
+
+  Spring_Temperature_Surface_WCGOA_Satellite -> Spring_Temperature_Surface_WCGOA_Satellite,1,AR1,0.001
+  Spring_Pollock_CPUE_Larvae_Shelikof_Survey -> Spring_Pollock_CPUE_Larvae_Shelikof_Survey,1,AR2,0.001
+  Summer_Large_Copepod_Abundance_Shelikof_Survey -> Summer_Large_Copepod_Abundance_Shelikof_Survey,1,AR3,0.001
+  Summer_Pollock_CPUE_YOY_Shelikof_Survey -> Summer_Pollock_CPUE_YOY_Shelikof_Survey,1,AR4,0.001
+  Summer_Pollock_Euphausiid_Diet_Juvenile_GOA_Survey -> Summer_Pollock_Euphausiid_Diet_Juvenile_GOA_Survey, 1, AR5, 1,0.001
+  Summer_Pollock_CPUE_YOY_Nearshore_Kodiak_Survey -> Summer_Pollock_CPUE_YOY_Nearshore_Kodiak_Survey, 1, AR6, 1,0.001
+  recdevs <-> recdevs, 0, sigmaR, 1
+
+  #external data relation
+  Spring_Temperature_Surface_WCGOA_Satellite ->  Spring_Pollock_CPUE_Larvae_Shelikof_Survey,0, SST_to_larvae
+  Spring_Pollock_CPUE_Larvae_Shelikof_Survey -> Summer_Pollock_CPUE_YOY_Shelikof_Survey,0, larvae_to_offYOY
+  Summer_Large_Copepod_Abundance_Shelikof_Survey -> Summer_Pollock_CPUE_YOY_Shelikof_Survey,0, copepod_to_offYOY
+  Summer_Pollock_CPUE_YOY_Shelikof_Survey -> Summer_Pollock_CPUE_YOY_Nearshore_Kodiak_Survey, 0, offYOY_to_inYOY
+  Summer_Pollock_CPUE_YOY_Nearshore_Kodiak_Survey -> recdevs, 1,inYOY_to_R
+  Summer_Pollock_Euphausiid_Diet_Juvenile_GOA_Survey -> recdevs, 1, euphausiid_to_R
+"
+family <- rep('fixed', ncol(dat_int_dsem))
+control <- dsem_control(use_REML=FALSE, run_model=FALSE)
+fit_null_dsem = dsem(sem=sem, tsdata=ts(dat_int_dsem), family=family, control=control)
+dsem:::summary.dsem(fit_null_dsem)
+
+## try to fit it inside the model, recdevs are the first column of dat_int_dsem and x_tj
+input_assess <- prepare_pk_input(path="source", modfile='goa_pk_dsem',
+                                 datfile='../data/2023/pk23_10.txt', version='dsem')
+
+
+## stack on the dsem inputs to the assessment ones
+input_int_dsem <- input_assess
+input_int_dsem$dat <- c(input_assess$dat, fit_null_dsem$tmb_inputs$dat)
+summary(input_int_dsem$dat)
+# input_int_dsem$dat$y_tj[,1] <- NA # so not counted in NLL? already done i think
+input_int_dsem$pars <- c(input_assess$pars, fit_null_dsem$tmb_inputs$parameters)
+input_int_dsem$map <- c(input_assess$map, fit_null_dsem$tmb_inputs$map)
+input_int_dsem$map$mu_j <- factor(c(NA,2:ncol(dat_int_dsem))) ## ??? ### map off recdev mean since already a parameter
+input_int_dsem$pars$mu_j[1] <- 0
+input_int_dsem$map$sigmaR <- NULL ## took out of model
+input_int_dsem$random <- c(input_assess$random, fit_null_dsem$tmb_inputs$random) #?? ici on n'a que x_tj de random , etonne que ds l'assessment y en ait pas
+input_int_dsem %>% summary()
+
+
+#fit
+# before fitting compile should have been done and ddl uploaded
+# compile('source/goa_pk_dsem.cpp')
+# dyn.load(dynlib('source/goa_pk_dsem'))
+fit_assess_dsem <- fit_pk(input=input_int_dsem, getsd=1, newtonsteps=1, do.fit=1)
+# xx <- sdreport(fit2$obj)
+fit_assess_dsem$opt$objective
+
+#plot recruitment
+fit_assess_dsem$sd %>% filter(name=='log_recruit') %>%
+  ggplot (aes(year, est, ymin=lwr, ymax=upr)) +
+  geom_pointrange() + labs(y='log Recruits (billions)') +
+  theme_bw()
+
+filter(fit_assess_dsem$sd, name %in% c('mean_log_recruit', 'beta_z', 'mu_j'))
