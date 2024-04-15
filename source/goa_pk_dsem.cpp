@@ -265,6 +265,7 @@ Type objective_function<Type>::operator() ()
   PARAMETER(mean_log_recruit);
   //PARAMETER_VECTOR(dev_log_recruit);
   //PARAMETER(sigmaR);
+  //Type mean_log_recruit;
   vector<Type> dev_log_recruit(nyrs);
   vector<Type> recruit(nyrs);
   vector<Type> log_recruit(nyrs);
@@ -675,6 +676,7 @@ Type objective_function<Type>::operator() ()
   jnll_dsem += jnll_gmrf_dsem;
   // link recruits to the dsem object
   dev_log_recruit=x_tj.matrix().col(0);
+  //mean_log_recruit = mu_j(0);
     
   // Reporting
   //REPORT( V_kk );
