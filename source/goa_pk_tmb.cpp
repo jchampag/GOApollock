@@ -720,7 +720,8 @@ Type objective_function<Type>::operator() ()
   // number of years
   vector<Type> rectmp=recruit.segment(1978-styr,endyr-1978);
    for (i=0;i<nyears_proj;i++)  N_proj(i,a0)=rectmp.mean();
-   recruit_proj=N_proj.col(0);
+  recruit_proj=N_proj.col(0);
+  vector<Type> log_recruit_proj = log(recruit_proj);
   //  Standard projection to get NAA in Jan-1 of first proj year
   //  which is first row of projections, comes from last row of
   //  standard quantities (this year)
@@ -1223,7 +1224,8 @@ Type objective_function<Type>::operator() ()
   REPORT(Z_proj);
   ADREPORT(recruit);
   ADREPORT(log_recruit);
-  ADREPORT(recruit_proj);  
+  ADREPORT(recruit_proj); 
+  ADREPORT(log_recruit_proj);
   ADREPORT(Esumbio_proj);  
   ADREPORT(Espawnbio_proj); 
   ADREPORT(Esrv_proj); 
