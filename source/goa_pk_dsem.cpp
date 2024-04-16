@@ -675,7 +675,8 @@ Type objective_function<Type>::operator() ()
   jnll_dsem -= loglik_tj.sum();
   jnll_dsem += jnll_gmrf_dsem;
   // link recruits to the dsem object
-  dev_log_recruit=x_tj.matrix().col(0);
+  vector<Type> xtj0 = x_tj.matrix().col(0);
+  dev_log_recruit= xtj0.segment(0,endyr-1970+1); //x_tj.matrix().col(0);
   //mean_log_recruit = mu_j(0);
     
   // Reporting
@@ -954,12 +955,11 @@ Type objective_function<Type>::operator() ()
   Esrv_proj.setZero();
   Type sbio;
 
-  // recruits from 1978 to previous year, index starting at 0,
-  // with the first arg being the index start, and the second the
-  // number of years
-  vector<Type> rectmp=recruit.segment(1978-styr,endyr-1978);
-   for (i=0;i<nyears_proj;i++)  N_proj(i,a0)=rectmp.mean();
-   recruit_proj=N_proj.col(0);
+  // recruits based on x_tj estimates
+  vector<Type> rectmp=xtj0.segment(endyr-1970+1,nyears_proj);//recruit.segment(1978-styr,endyr-1978);//.segment takes initial place and vector length
+   for (i=0;i<nyears_proj;i++)  N_proj(i,a0)= exp(mean_log_recruit+rectmp(i));//rectmp.mean();//x_tj.matrix().col(0).segment(endyr+1,endyr+nyears_proj);//
+  recruit_proj=N_proj.col(0);
+  vector<Type>log_recruit_proj=log(recruit_proj);
   //  Standard projection to get NAA in Jan-1 of first proj year
   //  which is first row of projections, comes from last row of
   //  standard quantities (this year)
@@ -1464,6 +1464,7 @@ Type objective_function<Type>::operator() ()
   REPORT(Z_proj);
   ADREPORT(recruit);
   ADREPORT(log_recruit);
+  ADREPORT(log_recruit_proj); 
   ADREPORT(recruit_proj);  
   ADREPORT(Esumbio_proj);  
   ADREPORT(Espawnbio_proj); 
