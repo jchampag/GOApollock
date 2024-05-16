@@ -264,6 +264,7 @@ Type objective_function<Type>::operator() ()
 
   // Forward projections
   PARAMETER_VECTOR(log_recr_proj);
+  PARAMETER_VECTOR(dev_log_recruit_proj);
   vector<Type> recruit_proj(nyears_proj);
   matrix<Type> N_proj(nyears_proj,nages);
   vector<Type> F_proj(nyears_proj);
@@ -718,8 +719,8 @@ Type objective_function<Type>::operator() ()
   // recruits from 1978 to previous year, index starting at 0,
   // with the first arg being the index start, and the second the
   // number of years
-  vector<Type> rectmp=recruit.segment(1978-styr,endyr-1978);
-   for (i=0;i<nyears_proj;i++)  N_proj(i,a0)=rectmp.mean();
+  vector<Type> rectmp=log_recruit.segment(1978-styr,endyr-1978);
+   for (i=0;i<nyears_proj;i++)  N_proj(i,a0)=exp(rectmp.mean()+dev_log_recruit_proj(i));
   recruit_proj=N_proj.col(0);
   vector<Type> log_recruit_proj = log(recruit_proj);
   //  Standard projection to get NAA in Jan-1 of first proj year
@@ -1067,6 +1068,9 @@ Type objective_function<Type>::operator() ()
 
     // Constraints on recruitment. Assumed sigmaR=1.3 for all devs
     loglik(17) += dnorm(dev_log_recruit, Type(0.0), sigmaR, true).sum();
+
+    // Projeciton part
+   loglik(17) += dnorm(dev_log_recruit_proj, Type(0.0), sigmaR, true).sum();
     
 
     for(i=y0+1;i<=y1;i++){
