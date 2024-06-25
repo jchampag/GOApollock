@@ -604,12 +604,14 @@ Type objective_function<Type>::operator() ()
     xhat_tj(t,j) = mu_j(j);
   }}
   jnll_gmrf_dsem = GMRF(Q_kk)( x_tj - xhat_tj - delta_k );
+  // Initial code
   //SIMULATE{
   //  if( resimulate_gmrf >= 1 ){
-  //    //x_tj = GMRF(Q_kk).simulate(x_tj);
-  //    //x_tj += xhat_tj + delta_k;
-  //  }
-  //  REPORT( x_tj );
+    //  x_tj=  GMRF(Q_kk).simulate(x_tj); 
+    //  x_tj += xhat_tj + delta_k;
+   //     vector<Type> xhat_tj_rowtmp = xhat_tj.matrix().row(t);
+  // }
+  //REPORT( x_tj );
   //}
 
   // Distribution for data
@@ -956,8 +958,8 @@ Type objective_function<Type>::operator() ()
   Type sbio;
 
   // recruits based on x_tj estimates
-  vector<Type> rectmp=xtj0.segment(endyr-1970+1,nyears_proj);//recruit.segment(1978-styr,endyr-1978);//.segment takes initial place and vector length
-   for (i=0;i<nyears_proj;i++)  N_proj(i,a0)= exp(mean_log_recruit+rectmp(i));//rectmp.mean();//x_tj.matrix().col(0).segment(endyr+1,endyr+nyears_proj);//
+  vector<Type> dev_log_recruit_proj=xtj0.segment(endyr-1970+1,nyears_proj);//recruit.segment(1978-styr,endyr-1978);//.segment takes initial place and vector length
+   for (i=0;i<nyears_proj;i++)  N_proj(i,a0)= exp(mean_log_recruit+dev_log_recruit_proj(i));//rectmp.mean();//x_tj.matrix().col(0).segment(endyr+1,endyr+nyears_proj);//
   recruit_proj=N_proj.col(0);
   vector<Type>log_recruit_proj=log(recruit_proj);
   //  Standard projection to get NAA in Jan-1 of first proj year
@@ -1445,6 +1447,7 @@ Type objective_function<Type>::operator() ()
   REPORT(Esrvlenp6);
   REPORT(slctfsh_proj);
   REPORT(recruit_proj);
+  REPORT(dev_log_recruit_proj);
   REPORT(log_recr_proj);
   REPORT(sigmasq_recr);
   REPORT(N_proj);
@@ -1466,6 +1469,8 @@ Type objective_function<Type>::operator() ()
   ADREPORT(log_recruit);
   ADREPORT(log_recruit_proj); 
   ADREPORT(recruit_proj);  
+  ADREPORT(dev_log_recruit);
+  //ADREPORT(mean_log_recruit);
   ADREPORT(Esumbio_proj);  
   ADREPORT(Espawnbio_proj); 
   ADREPORT(Esrv_proj); 
