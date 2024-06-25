@@ -262,10 +262,10 @@ Type objective_function<Type>::operator() ()
   // PARAMETER(mean_log_initN);
   PARAMETER_VECTOR(dev_log_initN); 
   vector<Type> initN(nages-1); // goes from 2 to 10
-  PARAMETER(mean_log_recruit);
+  //PARAMETER(mean_log_recruit);
   //PARAMETER_VECTOR(dev_log_recruit);
   //PARAMETER(sigmaR);
-  //Type mean_log_recruit;
+  Type mean_log_recruit;
   vector<Type> dev_log_recruit(nyrs);
   vector<Type> recruit(nyrs);
   vector<Type> log_recruit(nyrs);
@@ -604,7 +604,6 @@ Type objective_function<Type>::operator() ()
     xhat_tj(t,j) = mu_j(j);
   }}
   jnll_gmrf_dsem = GMRF(Q_kk)( x_tj - xhat_tj - delta_k );
-  
   //SIMULATE{
   //  if( resimulate_gmrf >= 1 ){
     //  x_tj=  GMRF(Q_kk).simulate(x_tj); 
@@ -680,7 +679,7 @@ Type objective_function<Type>::operator() ()
   // link recruits to the dsem object
   vector<Type> xtj0 = x_tj.matrix().col(0);
   dev_log_recruit= xtj0.segment(0,endyr-1970+1); //x_tj.matrix().col(0);
-  //mean_log_recruit = mu_j(0);
+  mean_log_recruit = mu_j(0);
     
   // Reporting
   //REPORT( V_kk );
@@ -1469,9 +1468,9 @@ Type objective_function<Type>::operator() ()
   ADREPORT(recruit);
   ADREPORT(log_recruit);
   ADREPORT(log_recruit_proj); 
-  ADREPORT(recruit_proj);  
+  ADREPORT(recruit_proj); 
   ADREPORT(dev_log_recruit);
-  //ADREPORT(mean_log_recruit);
+  ADREPORT(mean_log_recruit);
   ADREPORT(Esumbio_proj);  
   ADREPORT(Espawnbio_proj); 
   ADREPORT(Esrv_proj); 
