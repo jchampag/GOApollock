@@ -1,0 +1,4628 @@
+---
+title: "Assessment-Dsem tries"
+output: html_document
+date: "2024-04-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# rm(list=ls())
+## devtools::install_github("James-Thorson-NOAA/dsem")
+## install.packages("dsem")
+library(TMB)
+library(dsem)
+library(ggplot2)
+library(dplyr)
+## devtools::install_github("afsc-assessments/GOApollock", ref='dev')
+# devtools::install_github("jchampag/GOApollock", ref='dev')
+library(GOApollock)
+library(readxl)
+# theme_set(theme_bw())
+library(phylopath)
+library(ggpubr)
+library(reshape)
+library(gridExtra)
+source("AssessDsem_fns.R")
+
+```
+
+# 0. DATA READING + FORMATTING
+
+
+```{r}
+# ESP data
+dat0 <- read_xlsx('../data/2023/goa_pollock_2023_dsem.xlsx', sheet=1, skip=3, na='NA')
+
+# additional information about their lag
+lag <- read_xlsx('../data/2023/goa_pollock_2023_dsem.xlsx', sheet=1, range="B2:Z2",
+                 na='NA', col_names=FALSE) %>% as.numeric
+inc <- which(!is.na(lag))
+
+## only tine series used in the BAS analysis
+dat <- dat0[,inc]
+
+
+```
+
+
+```{r}
+## plot ESP data
+g1 <- pivot_longer(dat0, -Year) %>% filter(!is.na(value)) %>%
+  ggplot(aes(Year, value)) + geom_point() + facet_wrap('name', scales='free_y', ncol=4)
+g1 # ggsave("esp_time_series_all.png", g1, width=15, height=8)
+g2 <- pivot_longer(dat, -Year) %>% filter(!is.na(value)) %>%
+  ggplot(aes(Year, value)) + geom_point() + facet_wrap('name', scales='free_y', ncol=4)
+g2 # ggsave("esp_time_series_BAS.png", g2, width=15, height=6)
+
+```
+
+
+
+# 1. FIT POLLOCK USUAL ASSESSMENT MODEL 
+
+```{r}
+#run model
+input_assess_usual <- prepare_pk_input(path='../source', modfile='goa_pk_tmb',
+                          datfile='../data/2023/pk23_10.txt', version='sigmaR')
+
+input_assess_usual$map$sigmaR <- factor(1) # estimate
+input_assess_usual$random <- 'dev_log_recruit' # recdevs
+# decreasing influence of spawner survey
+input_assess_usual$dat$indxsurv_log_sd4 <- input_assess_usual$dat$indxsurv_log_sd4*5
+input_assess_usual$dat$indxsurv_log_sd5 <- input_assess_usual$dat$indxsurv_log_sd5*5
+
+
+# dyn.load(dynlib('source/goa_pk_tmb'))
+fit_assess_usual <- fit_pk(input=input_assess_usual, getsd=TRUE, newtonsteps=1, do.fit=1,save.sdrep = TRUE,filename = 'Ass_usual_dropidx.RDS')
+# fit_assess_usual$opt$objective
+
+```
+
+```{r}
+#or load previous fit
+# fit_assess_usual <- readRDS("../source/Ass_usual.rds")
+fit_assess_usual <- readRDS("../source/Ass_usual_dropidx.RDS")
+```
+
+
+```{r}
+# plot recruits
+fit_assess_usual$sd %>% filter(name=='log_recruit') %>%
+  ggplot (aes(year, est, ymin=lwr, ymax=upr)) +
+  geom_pointrange() + labs(y='log Recruits (billions)') +
+  theme_bw()
+
+```
+
+# 2. BASIC CAUSAL MAP (EXAMPLE ONE) 
+
+## 2.1 FIT EXTERNAL DSEM 
+
+
+### Dataset
+ 
+```{r}
+#reduce ESP dataset to 3 variables
+dat_names <- dat %>% names();dat_names
+dat_ext_dsem <- dat %>%
+  select(2:4)# %>% ts()
+
+```
+
+### Model
+
+```{r}
+#create the dsem formulation
+sem = "
+  # link, lag, param_name, start_value
+  Annual_Heatwave_GOA_Model -> Annual_Heatwave_GOA_Model, 1, AR1, 1
+  Spring_Chlorophylla_Peak_WCGOA_Satellite -> Spring_Chlorophylla_Peak_WCGOA_Satellite, 1, AR2, 1
+  Annual_Auklet_Reproductive_Success_Chowiet_Survey -> Annual_Auklet_Reproductive_Success_Chowiet_Survey, 1, AR3, 1
+#  Summer_Pollock_CPUE_YOY_Nearshore_Kodiak_Survey -> Summer_Pollock_CPUE_YOY_Nearshore_Kodiak_Survey, 1, AR4, 1
+#  Summer_Pollock_Euphausiid_Diet_Juvenile_GOA_Survey -> Summer_Pollock_Euphausiid_Diet_Juvenile_GOA_Survey, 1, AR5, 1
+#  Fall_Pollock_Condition_Adult_GOA_Fishery -> Fall_Pollock_Condition_Adult_GOA_Fishery, 1, AR6, 1
+#  Summer_Pollock_Area_Occupied_WCGOA_Model -> Summer_Pollock_Area_Occupied_WCGOA_Model, 1, AR7, 1
+#  Annual_Arrowtooth_Biomass_GOA_Model -> Annual_Arrowtooth_Biomass_GOA_Model, 1, AR8, 1
+#  Annual_Pacific_Ocean_Perch_Biomass_GOA_Model -> Annual_Pacific_Ocean_Perch_Biomass_GOA_Model, 1, AR9, 1
+#  Annual_Sablefish_Biomass_GOA_Model -> Annual_Sablefish_Biomass_GOA_Model, 1, AR10, 1
+"
+
+```
+
+```{r}
+## prepare using package
+family <- rep('fixed', ncol(dat_ext_dsem))
+## family <- c('normal', 'normal', 'normal', 'fixed', 'fixed', 'fixed')
+control <- dsem_control(use_REML=FALSE, run_model=TRUE,
+                        getsd=TRUE, trace=100, newton_loops=0)
+fit_ext_dsem <- dsem(sem=sem, tsdata=ts(dat_ext_dsem), family=family,
+            estimate_delta0=FALSE, control=control)
+dsem:::summary.dsem(fit_ext_dsem)
+ParHat = fit$obj$env$parList()
+
+```
+
+### ST plots
+
+```{r}
+## Quick plots, adapted from vignette cold pool example
+oldpar <- par(no.readonly = TRUE)
+par( mfcol=c(3,1), mar=c(2,2,2,0), mgp=c(2,0.5,0), tck=-0.02 )
+for(i in 1:ncol(dat_ext_dsem)){
+  tmp = dat_ext_dsem[,i,drop=FALSE]
+  tmp = cbind( tmp, "PSEM"=ParHat$x_tj[,i] )
+  SD = as.list(fit_ext_dsem$sdrep,what="Std.")$x_tj[,i]
+  tmp = cbind( tmp, outer(tmp[,2],c(1,1)) +
+                 outer(ifelse(is.na(SD),0,SD),c(-1,1)) )
+  #
+  plot( x=rownames(dat_ext_dsem), y=tmp[,1], ylim=range(tmp,na.rm=TRUE),
+        type="p", main=colnames(dat_ext_dsem)[i], pch=20, cex=2 )
+  lines( x=rownames(dat_ext_dsem), y=tmp[,2], type="l", lwd=2,
+         col="blue", lty="solid" )
+  polygon( x=c(rownames(dat_ext_dsem),rev(rownames(dat_ext_dsem))),
+           y=c(tmp[,3],rev(tmp[,4])), col=rgb(0,0,1,0.2), border=NA )
+}
+
+```
+
+
+### DAG plot
+
+```{r}
+p1 = plot( (as_fitted_DAG(fit_ext_dsem)), edge.width=1, type="width",
+           text_size=4, show.legend=FALSE,
+           arrow = grid::arrow(type='closed', 18, grid::unit(10,'points')) ) +
+  scale_x_continuous(expand = c(0.4, 0.1))
+p1$layers[[1]]$mapping$edge_width = 1
+p2 = plot( (as_fitted_DAG(fit, what="p_value")), edge.width=1, type="width",
+           text_size=4, show.legend=FALSE, colors=c('black', 'black'),
+           arrow = grid::arrow(type='closed', 18, grid::unit(10,'points')) ) +
+  scale_x_continuous(expand = c(0.4, 0.1))
+p2$layers[[1]]$mapping$edge_width = 0.5
+
+ggarrange(p1, p2, labels = c("Simultaneous effects", "Two-sided p-value"),
+          ncol = 1, nrow = 2)
+
+
+```
+
+
+## 2.2 TRY FITING DSEM INSIDE ASSESSMENT MODEL 
+
+### Dataset
+
+```{r}
+## pad extra years on beginning of time series
+dat_int_dsem <- bind_rows(data.frame(Year=1970:1976), dat[,-1]) %>%
+  select(2:4) %>%
+  mutate(recdevs=NA) %>% relocate(recdevs)
+# quick check that we are matching assessment duration #
+dat_int_dsem %>% dim() # nyrs <- 54;stopifnot(length(dat_int_dsem$Year)==nyrs)
+
+pairs(dat_int_dsem[,-1], upper.panel=NULL)
+
+```
+
+### Model
+
+```{r}
+family <- rep('fixed', ncol(dat_int_dsem))
+control <- dsem_control(use_REML=FALSE, run_model=FALSE)
+fit_null_dsem = dsem(sem=sem, tsdata=ts(dat_int_dsem), family=family, control=control)
+dsem:::summary.dsem(fit_null_dsem)
+
+```
+
+```{r}
+
+## try to fit it inside the model, recdevs are the first column of dat_int_dsem and x_tj
+input_assess <- prepare_pk_input(path="source", modfile='goa_pk_dsem',
+                          datfile='../data/2023/pk23_10.txt', version='dsem')
+
+
+## stack on the dsem inputs to the assessment ones
+input_int_dsem <- input_assess
+input_int_dsem$dat <- c(input_assess$dat, fit_null_dsem$tmb_inputs$dat)
+summary(input_int_dsem$dat)
+# input_int_dsem$dat$y_tj[,1] <- NA # so not counted in NLL? already done i think
+input_int_dsem$pars <- c(input_assess$pars, fit_null_dsem$tmb_inputs$parameters)
+input_int_dsem$map <- c(input_assess$map, fit_null_dsem$tmb_inputs$map)
+input_int_dsem$map$mu_j <- factor(c(NA,2:ncol(dat_int_dsem))) ## ??? ### map off recdev mean since already a parameter
+input_int_dsem$pars$mu_j[1] <- 0
+input_int_dsem$map$sigmaR <- NULL ## took out of model
+input_int_dsem$random <- c(input_assess$random, fit_null_dsem$tmb_inputs$random) #?? ici on n'a que x_tj de random , etonne que ds l'assessment y en ait pas
+input_int_dsem %>% summary()
+
+
+```
+
+```{r}
+#fit
+# before fitting compile should have been done and ddl uploaded
+# compile('source/goa_pk_dsem.cpp')
+# dyn.load(dynlib('source/goa_pk_dsem'))
+fit_assess_dsem <- fit_pk(input=input_int_dsem, getsd=1, newtonsteps=1, do.fit=1)
+# xx <- sdreport(fit2$obj)
+fit_assess_dsem$opt$objective
+
+```
+
+
+### Rec plot 
+ 
+```{r}
+#plot recruitment
+fit_assess_dsem$sd %>% filter(name=='log_recruit') %>%
+  ggplot (aes(year, est, ymin=lwr, ymax=upr)) +
+  geom_pointrange() + labs(y='log Recruits (billions)') +
+  theme_bw()
+
+filter(fit_assess_dsem$sd, name %in% c('mean_log_recruit', 'beta_z', 'mu_j'))
+
+```
+
+### Dag plot
+
+```{r}
+p1 = plot( (as_fitted_DAG(fit_ext_dsem)), edge.width=1, type="width",
+           text_size=4, show.legend=FALSE,
+           arrow = grid::arrow(type='closed', 18, grid::unit(10,'points')) ) +
+  scale_x_continuous(expand = c(0.4, 0.1))
+p1$layers[[1]]$mapping$edge_width = 1
+p2 = plot( (as_fitted_DAG(fit_ext_dsem, what="p_value")), edge.width=1, type="width",
+           text_size=4, show.legend=FALSE, colors=c('black', 'black'),
+           arrow = grid::arrow(type='closed', 18, grid::unit(10,'points')) ) +
+  scale_x_continuous(expand = c(0.4, 0.1))
+p2$layers[[1]]$mapping$edge_width = 0.5
+
+ggarrange(p1, p2, labels = c("Simultaneous effects", "Two-sided p-value"),
+          ncol = 1, nrow = 2)
+
+```
+
+
+
+## 2.3 COMPARE RESCRUITMENT ESTIMATES
+
+```{r}
+# estimated time series of recruitment
+fit_assess_dsem$sd %>% mutate(version='dsem') %>%
+  bind_rows(fit_assess_usual$sd) %>% filter(name=='log_recruit') %>%
+  mutate(year=ifelse(version=='dsem', year-.2, year+.2)) %>% #pull(version) %>% unique()
+  ggplot(aes(year, est, ymin=lwr, ymax=upr, color=version)) +
+  geom_pointrange() + labs(y='log Recruits (billions)') +
+  theme_bw()
+fit_assess_dsem$opt$objective;fit_usual_assess$opt$objective
+
+```
+
+
+# 3. MORE ELABORATE CAUSAL MAP 
+
+Map from Jim/Kalei based on this https://docs.google.com/presentation/d/1zd3F-9f3XWbWrHq1bNYlICWt-MRQWol5/edit#slide=id.g26bbffea2a2_1_0
+
+=> actual map with euphausiids relating to 3 life stage (offYOY, inYOY and rec) looks a bit too complicated
+simplifying to 1 relation from euph -> offYOY (as Kalei suggested, they are sampled at the same time)
+
+
+### ESP dataset
+
+```{r}
+dat0_names <- dat0 %>% names()#;dat0_names
+var_of_interest2 <- c(3,9,10,12,13,15)#;dat0_names[var_of_interest2]
+
+## pad extra years on beginning of time series + renaming everything + scaling it + adding recdevs
+dat_int_dsem2 <- bind_rows(data.frame(Year=1970:1976), dat0[,-1]) %>%
+  select(all_of(var_of_interest2)) %>%# names()
+  dplyr::rename("SST"='Spring_Temperature_Surface_WCGOA_Satellite'  ,
+         "Larvae"="Spring_Pollock_CPUE_Larvae_Shelikof_Survey",
+         "Copepod"="Summer_Large_Copepod_Abundance_Shelikof_Survey" ,
+         "OffYOY"="Summer_Pollock_CPUE_YOY_Shelikof_Survey",
+         "inYOY"= "Summer_Pollock_CPUE_YOY_Nearshore_Kodiak_Survey",
+         'Euph'="Summer_Euphausiid_Abundance_Kodiak_Survey") %>%
+  scale() %>% as.data.frame() %>%
+  mutate(recdevs=NA) %>% relocate(recdevs)
+
+# quick check that we are matching assessment duration #
+dat_int_dsem2 %>% dim() #
+
+# plotting tentative
+pairs(dat_int_dsem2[,-1], upper.panel=NULL)
+
+dat_int_dsem2 %>% select(-recdevs) %>% mutate(year=1970:2023) %>% pivot_longer(-year) %>% 
+  mutate(name=factor(name,levels=c("SST","Copepod","Euph","Larvae","OffYOY","inYOY" ))) %>% 
+  ggplot(aes(year,value))+ geom_point()+
+  geom_line() + facet_wrap(~name)
+
+```
+
+### SEM statement
+
+```{r}
+## prepare data using dsem package
+sem = "
+  # link, lag, param_name, start_value
+
+  #internal data relation
+  SST -> SST,1,AR1
+  Larvae -> Larvae,1,AR2
+  Copepod -> Copepod,1,AR3
+  OffYOY -> OffYOY,1,AR4
+  inYOY -> inYOY,1,AR5
+  Euph -> Euph,1,AR6
+  recdevs <-> recdevs, 0, sigmaR, 1
+
+  #causal relation
+  SST -> Larvae, 0, SST_to_larvae#,1
+  Larvae -> OffYOY,0, larvae_to_offYOY#,1
+  Copepod -> OffYOY,0, copepod_to_offYOY#,1
+  Euph  -> OffYOY, 0, euph_to_offYOY#,1
+  OffYOY -> inYOY, 0, offYOY_to_inYOY#,1
+  inYOY -> recdevs, 1,inYOY_to_R#,1
+  # Euph  -> recdevs, 1, euphausiid_to_R#,1
+"
+
+family <- rep('fixed', ncol(dat_int_dsem2))
+control <- dsem_control(use_REML=FALSE, run_model=FALSE)
+fit_null_dsem = dsem(sem=sem, tsdata=ts(dat_int_dsem2), family=family, control=control)
+# dsem:::summary.dsem(fit_null_dsem)
+
+
+```
+
+## 3.1 FIT ANOTHER EXTERNAL DSEM+REC 
+
+### Rec data from usual model
+
+```{r}
+# fit_assess_usual$sd %>% filter(name=='dev_log_recruit') %>% pull(est) #%>% length()
+# fit_assess_usual$sd %>% filter(name%in%c('dev_log_recruit','log_recruit')) %>%
+#   ggplot()+geom_line(aes(year,est,col=name))
+                               
+
+dat_ext_dsem2 <- dat_int_dsem2 %>%  
+  mutate(recdevs=fit_assess_usual$sd %>% filter(name=='dev_log_recruit') %>% pull(est))
+
+```
+
+### Model
+
+
+```{r}
+## prepare using package
+family <- rep('fixed', ncol(dat_ext_dsem2))
+
+control <- dsem_control(use_REML=FALSE, run_model=TRUE,
+                        getsd=TRUE, trace=100, newton_loops=0)
+
+fit_ext_dsem2 <- dsem(sem=sem, tsdata=ts(dat_ext_dsem2), family=family,
+                     estimate_delta0=FALSE, control=control)
+# fit_ext_dsem$opt$convergence
+# dsem:::summary.dsem(fit_ext_dsem)
+# ParHat = fit_ext_dsem2$obj$env$parList();ParHat
+```
+
+### Time series plot
+
+```{r}
+oldpar <- par(no.readonly = TRUE)
+par( mfcol=c(ncol(dat_ext_dsem2),1), mar=c(2,2,2,0), mgp=c(2,0.5,0), tck=-0.02 )
+for(i in 1:ncol(dat_ext_dsem2)){
+  tmp = dat_ext_dsem2[,i,drop=FALSE]
+  tmp = cbind( tmp, "PSEM"=ParHat$x_tj[,i] )
+  SD = as.list(fit_ext_dsem$sdrep,what="Std.")$x_tj[,i]
+  tmp = cbind( tmp, outer(tmp[,2],c(1,1)) +
+                 outer(ifelse(is.na(SD),0,SD),c(-1,1)) )
+  #
+  plot( x=1977:2023, y=tmp[,1], ylim=range(tmp,na.rm=TRUE),
+        type="p", main=colnames(dat_ext_dsem2)[i], pch=20, cex=2 )
+  lines( x=1977:2023, y=tmp[,2], type="l", lwd=2,
+         col="blue", lty="solid" )
+  polygon( x=c(1977:2023,rev(1977:2023)),
+           y=c(tmp[,3],rev(tmp[,4])), col=rgb(0,0,1,0.2), border=NA )
+}
+
+```
+
+
+### DAG plot
+
+```{r}
+summary(fit_ext_dsem2)
+
+as_fitted_DAG_multLag(fit_ext_dsem2,lag=c(0,1),out.type = 'table',which.link = 'causal')
+
+p1_ext = plot( (as_fitted_DAG_multLag(fit_ext_dsem2,lag=c(0,1))), edge.width=1, type="width",
+           text_size=4, show.legend=FALSE,
+           arrow = grid::arrow(type='closed', 18, grid::unit(10,'points')) ) +
+  scale_x_continuous(expand = c(0.4, 0.1))
+# p1$layers[[1]]$mapping$edge_width = 1
+
+p2_ext = plot( (as_fitted_DAG_multLag(fit_ext_dsem2,lag=c(0,1), what="p_value")), edge.width=1, type="width",
+           text_size=4, show.legend=FALSE, colors=c('black', 'black'),
+           arrow = grid::arrow(type='closed', 18, grid::unit(10,'points')) ) +
+  scale_x_continuous(expand = c(0.4, 0.1))
+p2_ext$layers[[1]]$mapping$edge_width = 0.5
+
+ggarrange(p1_ext, p2_ext, labels = c("Simultaneous effects", "Two-sided p-value"),
+          ncol = 1, nrow = 2)
+
+```
+
+
+
+
+## 3.2 TRY TO FIT ANOTHER DSEM INSIDE ASSESSMENT MODEL 
+
+
+### 3.2a FIT WITH OLD CPP 
+
+#### Model
+
+```{r}
+input_assess <- prepare_pk_input(path="../source", modfile='goa_pk_dsem_old',
+                                 datfile='../data/2023/pk23_10.txt', version='dsem')
+
+
+## stack on the dsem inputs to the assessment ones
+input_int_dsem <- input_assess
+input_int_dsem$dat <- c(input_assess$dat, fit_null_dsem$tmb_inputs$dat)
+# summary(input_int_dsem$dat)
+# input_int_dsem$dat$y_tj[,1] <- NA # so not counted in NLL? already done i think
+input_int_dsem$pars <- c(input_assess$pars, fit_null_dsem$tmb_inputs$parameters)
+input_int_dsem$map <- c(input_assess$map, fit_null_dsem$tmb_inputs$map)
+input_int_dsem$map$mu_j <- factor(c(NA,2:ncol(dat_int_dsem2))) ## ??? ### map off recdev mean since already a parameter
+input_int_dsem$pars$mu_j[1] <- 0
+input_int_dsem$map$sigmaR <- NULL ## took out of model
+input_int_dsem$random <- c(input_assess$random, fit_null_dsem$tmb_inputs$random) #
+# input_int_dsem %>% summary()
+
+
+```
+
+```{r}
+#fit
+# before fitting compile should have been done and ddl uploaded
+# dyn.unload(dynlib('source/goa_pk_dsem_old'))
+# compile('source/goa_pk_dsem_old.cpp')
+# dyn.load(dynlib('source/goa_pk_dsem_old'))
+fit_assess_dsem_old <- fit_pk(input=input_int_dsem, getsd=1, newtonsteps=1, do.fit=1,filename = "AssDsem_old.RDS",save.sdrep = TRUE)
+# xx <- sdreport(fit2$obj)
+# fit_assess_dsem_old$opt$objective
+
+```
+
+
+```{r}
+fit_assess_dsem_old <- readRDS("../source/AssDsem_old.RDS")
+```
+
+#### Plot rec
+
+```{r}
+#plot recruitment
+fit_assess_dsem_old$sd %>% filter(name=='log_recruit') %>%
+  ggplot (aes(year, est, ymin=lwr, ymax=upr)) +
+  geom_pointrange() + labs(y='log Recruits (billions)') +
+  theme_bw()
+
+```
+
+
+#### Estimated causal link
+
+```{r}
+#filter some outputs
+filter(fit_assess_dsem_old$sd, name %in% c('mean_log_recruit', 'beta_z', 'mu_j'))
+
+#filter causal links
+model_AssDsem = fit_null_dsem$sem_full
+ParHat_AssDsem <- list('beta_z'= fit_assess_dsem_old$sd %>% filter(name== 'beta_z') %>% pull(est),
+                       'mu_j'= fit_assess_dsem_old$sd %>% filter(name== 'mu_j') %>% pull(est))#,
+coefs2 = data.frame( model_AssDsem, "Estimate"=c(NA,ParHat_AssDsem$beta_z)[ as.numeric(model_AssDsem[,'parameter'])+1 ] ) # parameter=0 outputs NA
+coefs2
+
+```
+
+
+#### Estimated ESP time series
+
+```{r}
+
+fit_assess_dsem_old$sd %>% filter(name=='x_tj') %>%
+  mutate(name=c(rep('recdevs',54),
+                rep('SST',length(which(is.na(dat_int_dsem2$SST)))),
+                rep('Copepod',length(which(is.na(dat_int_dsem2$Copepod)))),
+                rep('Euph',length(which(is.na(dat_int_dsem2$Euph)))),
+                rep('Larvae',length(which(is.na(dat_int_dsem2$Larvae)))),
+                rep('OffYOY',length(which(is.na(dat_int_dsem2$OffYOY)))),
+                rep('inYOY',length(which(is.na(dat_int_dsem2$inYOY)))))) %>% 
+  mutate(year=c(duration[which(is.na(dat_int_dsem2$recdevs))],
+                duration[which(is.na(dat_int_dsem2$SST))],
+                duration[which(is.na(dat_int_dsem2$Copepod))],
+                duration[which(is.na(dat_int_dsem2$Euph))],
+                duration[which(is.na(dat_int_dsem2$Larvae))],
+                duration[which(is.na(dat_int_dsem2$OffYOY))],
+                duration[which(is.na(dat_int_dsem2$inYOY))])) %>% 
+  mutate(type="estimation") %>%
+  select(name,est,year,lwr,upr,type) %>% 
+  ## adding input data point to fill the gaps
+  bind_rows(dat_int_dsem2 %>% select(-recdevs) %>% mutate(year=1970:2023) %>% 
+              pivot_longer(-year) %>% filter(!is.na(value)) %>% 
+              dplyr::rename('est'=value) %>% mutate(type="data")) %>% 
+  filter(name!='recdevs') %>% 
+  mutate(name=factor(name,levels=c("SST","Copepod","Euph","Larvae","OffYOY","inYOY" ))) %>%
+  ggplot()+geom_point(aes(year,est,shape=type))+facet_wrap(~name)+
+  geom_ribbon(aes(year,ymin=lwr,ymax=upr),alpha=0.2)+
+  theme(legend.position = 'bottom')+scale_shape_manual(values=c(19,1))
+
+
+```
+
+### 3.2b FIT WITH NEW CPP 
+
+```{r}
+
+input_assess <- prepare_pk_input(path="../source", modfile='goa_pk_dsem',
+                                 datfile='../data/2023/pk23_10.txt', version='dsem')
+
+
+## stack on the dsem inputs to the assessment ones
+input_int_dsem <- input_assess
+input_int_dsem$dat <- c(input_assess$dat, fit_null_dsem$tmb_inputs$dat)
+# summary(input_int_dsem$dat)
+# input_int_dsem$dat$y_tj[,1] <- NA # so not counted in NLL? already done i think
+input_int_dsem$pars <- c(input_assess$pars, fit_null_dsem$tmb_inputs$parameters)
+input_int_dsem$map <- c(input_assess$map, fit_null_dsem$tmb_inputs$map)
+input_int_dsem$map$mu_j <- factor(c(NA,2:ncol(dat_int_dsem2))) ## ??? ### map off recdev mean since already a parameter
+# input_int_dsem$pars$mu_j[1] <- 0
+input_int_dsem$map$sigmaR <- NULL ## took out of model
+input_int_dsem$random <- c(input_assess$random, fit_null_dsem$tmb_inputs$random)
+# input_int_dsem %>% summary()
+
+
+```
+
+
+#### Model
+
+```{r}
+#fit
+# before fitting compile should have been done and ddl uploaded
+# dyn.unload(dynlib('source/goa_pk_dsem'))
+# compile('source/goa_pk_dsem.cpp')
+# dyn.load(dynlib('source/goa_pk_dsem'))
+fit_assess_dsem <- fit_pk(input=input_int_dsem, getsd=1, newtonsteps=1, do.fit=1,save.sdrep = TRUE)#,filename = "AssDsem_new.RDS")
+# xx <- sdreport(fit2$obj)
+fit_assess_dsem$opt$objective
+
+```
+
+```{r}
+fit_assess_dsem <- readRDS("../source/AssDsem_new.RDS")
+```
+
+#### plot recruitment
+
+```{r}
+
+fit_assess_dsem$sd %>% filter(name=='log_recruit') %>%
+  ggplot (aes(year, est, ymin=lwr, ymax=upr)) +
+  geom_pointrange() + labs(y='log Recruits (billions)') +
+  theme_bw()
+
+```
+
+```{r}
+source('AssDsem_fns.R')
+#filter some outputs
+# filter(fit_assess_dsem$sd, name %in% c('mean_log_recruit', 'beta_z', 'mu_j'))
+
+#filter causal links
+# model_AssDsem = fit_null_dsem$sem_full
+# ParHat_AssDsem <- list('beta_z'= fit_assess_dsem$sd %>% filter(name== 'beta_z') %>% pull(est),
+#                        'mu_j'= fit_assess_dsem$sd %>% filter(name== 'mu_j') %>% pull(est))#,
+# coefs = data.frame( model_AssDsem, "Estimate"=c(NA,ParHat_AssDsem$beta_z)[ as.numeric(model_AssDsem[,'parameter'])+1 ] ) # parameter=0 outputs NA
+
+as_fitted_DAG_assDsem(fit_null_dsem,fit_assess_dsem,out.type = 'table',which.link = "causal")
+
+```
+
+### 3.2c COMPARE FITS
+
+#### Compare estimates recruitment
+
+```{r}
+fit_assess_dsem$sd %>% mutate(version='AssesDsem_new') %>%#pull(name) %>% unique()
+  bind_rows(fit_assess_dsem_old$sd %>% mutate(version='AssessDsem_old')) %>%
+  bind_rows(fit_assess_usual$sd %>% mutate(version='usual')) %>%
+  filter(name=='log_recruit') %>%
+  # mutate(year=ifelse(version!='usual', year-.2, year+.2)) %>% #pull(version) %>% unique()
+  ggplot(aes(year, est, ymin=lwr, ymax=upr, color=version)) +
+  geom_pointrange(position=position_dodge(width=1)) + labs(y='log Recruits (billions)') +
+  theme_bw()
+
+fit_assess_dsem$opt$objective;fit_usual_assess$opt$objective
+
+```
+
+
+#### Compare estimated causal link
+
+```{r}
+coefs %>% filter(first!=second) %>% select(path,Estimate) %>% dplyr::rename('dsem_new'=Estimate) %>%
+  bind_cols(coefs2 %>% filter(first!=second) %>% select(Estimate) %>% dplyr::rename('dsem_old'=Estimate)) %>%
+  pivot_longer(-path) %>%
+  ggplot()+
+  geom_point(aes(path,value,col=name))+coord_flip()
+```
+
+
+```{r}
+p1_new = plot( (as_fitted_DAG_assDsem(fit_null_dsem = fit_null_dsem,fit=fit_assess_dsem)), edge.width=1, type="width",
+           text_size=4, show.legend=FALSE,
+           arrow = grid::arrow(type='closed', 18, grid::unit(10,'points')) ) +
+  scale_x_continuous(expand = c(0.4, 0.1));p1_new
+
+p1_old = plot( (as_fitted_DAG_assDsem(fit_null_dsem = fit_null_dsem,fit=fit_assess_dsem_old)), edge.width=1, type="width",
+               text_size=4, show.legend=FALSE,
+               arrow = grid::arrow(type='closed', 18, grid::unit(10,'points')) ) +
+  scale_x_continuous(expand = c(0.4, 0.1));p1_old
+# p1$layers[[1]]$mapping$edge_width = 1
+
+p2_new = plot(  (as_fitted_DAG_assDsem(fit_null_dsem = fit_null_dsem,fit=fit_assess_dsem,what = 'p_value')), edge.width=1, type="width",
+           text_size=4, show.legend=FALSE, colors=c('black', 'black'),
+           arrow = grid::arrow(type='closed', 18, grid::unit(10,'points')) ) +
+  scale_x_continuous(expand = c(0.4, 0.1));p2_new
+
+p2_old = plot(  (as_fitted_DAG_assDsem(fit_null_dsem = fit_null_dsem,fit=fit_assess_dsem_old,what = 'p_value')), edge.width=1, type="width",
+                text_size=4, show.legend=FALSE, colors=c('black', 'black'),
+                arrow = grid::arrow(type='closed', 18, grid::unit(10,'points')) ) +
+  scale_x_continuous(expand = c(0.4, 0.1))
+
+# p2$layers[[1]]$mapping$edge_width = 0.5
+
+ggarrange(p1_old, p2_old, labels = c("causal link", "pvalue"), 
+          ncol = 1, nrow = 2)
+
+ggarrange(p1_new, p1_old,p2_new,p2_old,labels = c("new cpp", "old cpp"),
+          ncol = 2, nrow = 2)
+
+```
+
+#### Compare causal maps fitted on log_recruits with causal map on dev_log_recruits
+
+```{r}
+
+ggarrange(p1_ext,p1_old, p1_new,p2_ext,p2_old,p2_new,labels = c('ExtDsem',"AssessDsem old cpp", "AssessDsem new cpp"),
+          ncol = 3, nrow = 2)
+
+```
+#### TRIES Compare ESP ST from dsem estimation
+
+```{r}
+
+parHat_AssessDsem_new <- fit_assess_dsem$obj$env$parList()
+parHat_AssessDsem_old <- fit_assess_dsem_old$obj$env$parList()
+parHat_ext_Dsem <- fit_ext_dsem2$obj$env$parList()
+
+plot_ST <- parHat_AssessDsem_new$x_tj %>% as.data.frame() %>% 
+  bind_cols(Year=fit_assess_dsem$input$dat$styr:fit_assess_dsem$input$dat$endyr) %>%
+  mutate(fit='AssessDsem_new') %>% 
+  bind_rows(parHat_AssessDsem_old$x_tj %>% as.data.frame() %>% 
+  bind_cols(Year=fit_assess_dsem$input$dat$styr:fit_assess_dsem$input$dat$endyr) %>% 
+    mutate(fit="AssessDsem_old")) %>% 
+  bind_rows(parHat_ext_Dsem$x_tj %>% as.data.frame() %>% 
+  bind_cols(Year=fit_assess_dsem$input$dat$styr:fit_assess_dsem$input$dat$endyr) %>% 
+    mutate(fit="ExtDsem")) %>% 
+  pivot_longer(-c(Year,fit)) %>% 
+  filter(name!='recdevs',fit!='AssessDsem_new') %>% 
+  ggplot()+geom_line(aes(Year,value,col=fit))+facet_wrap(~name);plot_ST
+  
+
+```
+
+
+pb on n'a pas les intervalles de confiance
+essaie d'extraire les valeurs des sd.rep
+pour extDsem c'est facile (function par.list marche)
+mais pour AssessDsem c'est relou
+
+
+
+```{r}
+
+fit_assess_dsem$sdrep.par.random  %>% length()
+fit_assess_dsem_old$sdrep.par.random  %>% length()
+fit_ext_dsem2$sdrep$par.random %>% length()
+
+fit_ext_dsem2$obj$env$parList()
+
+fit_assess_dsem$obj$env$parList()
+as.list(fit_assess_dsem,'Estimate')$x_tj
+
+ParHat=fit_assess_dsem$obj$env$parList()
+ParHat$x_tj %>% dim()
+
+fit_assess_dsem$sd %>% filter(name=='x_tj') %>% dim()
+
+fit_ext_dsem2$obj$env$parList
+
+ParHat$x_tj 
+```
+
+mais la taille des x_tj vectorise n'est pas la meme pour extDsem et AssessDsem
+je sais pas pourquoi
+en plus 202 et 256 ne correspondent a rien en terme de / par 6 ou 7 (nb de colonne intial) -> par contre la diff est de 54 donc 1 st de notre duree
+
+peut etre lie aux NA ?
+verifie ds le dataset ESP la taille d'un vecteur de valeur non na
+
+```{r}
+# dat_ext_dsem2 %>% mutate(Year=1970:2023) %>% 
+#   pivot_longer(-Year) %>% 
+#   filter(!is.na(value)) %>% dim()
+
+dat_ext_dsem2 %>% mutate(Year=1970:2023) %>% 
+  pivot_longer(-Year) %>% 
+  filter(!is.na(value)) %>% pull(value) %>% length()
+
+dat_int_dsem2 %>% mutate(Year=1970:2023) %>% 
+  pivot_longer(-Year) %>% 
+  filter(!is.na(value)) %>% pull(value) %>% length()
+```
+ok cette valeur n'est pas la meme pour le datset int/ext, normal ds ext je colle que des na dans rec dev (54 annee dc la somme est ok)
+
+
+256+122 = 378 = 7*54
+donc les parametre aleatoire qu'on a la ce sont bien les NA qui nous manque dans les series temporelles initiales
+
+#### FINAL Compare ESP ST from dsem estimation
+
+```{r}
+duration <- 1970:2023
+
+plot_comp_ST <- #starting with External Dsem estimates
+  as.list(fit_ext_dsem2$sdrep,what="Std.")$x_tj %>% as.data.frame() %>% 
+  mutate(year=duration) %>% pivot_longer(-year,values_to = "se") %>% 
+  full_join(as.list(fit_ext_dsem2$sdrep,what="Estimate")$x_tj %>%  as.data.frame() %>% 
+  mutate(year=duration) %>% pivot_longer(-year,values_to = "est")) %>% 
+  mutate(lwr=est-qnorm(0.975)*se,
+         upr=est+qnorm(0.975)*se,
+         type=ifelse(is.na(se),'data','estimation'),
+         model='ExtDsem') %>%
+  # select(-stde) %>% 
+  ## binding rows with AssessDsem estimations
+  bind_rows(fit_assess_dsem_old$sd %>% filter(name=='x_tj') %>%
+              mutate(name=c(rep('recdevs',54),
+                            rep('SST',length(which(is.na(dat_int_dsem2$SST)))),
+                            rep('Copepod',length(which(is.na(dat_int_dsem2$Copepod)))),
+                            rep('Euph',length(which(is.na(dat_int_dsem2$Euph)))),
+                            rep('Larvae',length(which(is.na(dat_int_dsem2$Larvae)))),
+                            rep('OffYOY',length(which(is.na(dat_int_dsem2$OffYOY)))),
+                            rep('inYOY',length(which(is.na(dat_int_dsem2$inYOY)))))) %>% 
+              mutate(year=c(duration[which(is.na(dat_int_dsem2$recdevs))],
+                            duration[which(is.na(dat_int_dsem2$SST))],
+                            duration[which(is.na(dat_int_dsem2$Copepod))],
+                            duration[which(is.na(dat_int_dsem2$Euph))],
+                            duration[which(is.na(dat_int_dsem2$Larvae))],
+                            duration[which(is.na(dat_int_dsem2$OffYOY))],
+                            duration[which(is.na(dat_int_dsem2$inYOY))])) %>% 
+              mutate(type="estimation") %>%
+              select(name,est,year,lwr,upr,type) %>% 
+              ## adding intial data point to fill the gaps
+              bind_rows(dat_int_dsem2 %>% select(-recdevs) %>% mutate(year=duration) %>% 
+                          pivot_longer(-year) %>% filter(!is.na(value)) %>% 
+                          dplyr::rename('est'=value) %>% mutate(type="data")) %>% 
+                          mutate(model="AssessDsem")) %>% 
+  filter(name!='recdevs') %>% #,model!='AssessDsem') %>% 
+  mutate(name=factor(name,levels=c("SST","Copepod","Euph","Larvae","OffYOY","inYOY" ))) %>%
+  ggplot()+geom_point(aes(year,est,col=model,shape=type))+
+  geom_line(aes(year,est,col=model))+
+  facet_wrap(~name)+
+  geom_ribbon(aes(year,ymin=lwr,ymax=upr,fill=model),alpha=0.2)+
+  theme(legend.position = 'bottom')+
+  scale_shape_manual(values=c(19,1))
+plot_comp_ST
+```
+
+
+# 4. ADD PROJECTION MODULE
+
+```{r}
+duration = 1970:2023
+ny_proj=15
+```
+
+### ESP dataset
+
+```{r}
+dat0_names <- dat0 %>% names()#;dat0_names
+var_of_interest2 <- c(3,9,10,12,13,15)#;dat0_names[var_of_interest2]
+
+## pad extra years on beginning of time series + renaming everything + scaling it + adding recdevs +
+# adding extras NAs at the end fo projection purpose
+dat_int_dsem_proj <- bind_rows(data.frame(Year=c(1970:1976)), dat0[,-1]) %>%
+  select(c(all_of(var_of_interest2))) %>%# names()
+  dplyr::rename("SST"='Spring_Temperature_Surface_WCGOA_Satellite'  ,
+         "Larvae"="Spring_Pollock_CPUE_Larvae_Shelikof_Survey",
+         "Copepod"="Summer_Large_Copepod_Abundance_Shelikof_Survey" ,
+         "OffYOY"="Summer_Pollock_CPUE_YOY_Shelikof_Survey",
+         "inYOY"= "Summer_Pollock_CPUE_YOY_Nearshore_Kodiak_Survey",
+         'Euph'="Summer_Euphausiid_Abundance_Kodiak_Survey") %>%
+  mutate_all(.funs =scale ) %>%
+  # scale() %>% as.data.frame() %>%
+  mutate(recdevs=NA) %>% relocate(recdevs) %>% 
+  add_row(recdevs=rep(NA,ny_proj))
+  # add_row(rep(NA,(length(var_of_interest2)+1)*ny_proj))
+  #bind_rows(as.data.frame(matrix(NA,ncol=length(var_of_interest2)+1,nrow=ny_proj,
+                   #            dimnames=list(NULL,
+               # c('recdevs','SST','Larvae','Copepod','OffYOY','inYOY','Euph')))))#,id='id')
+ 
+
+```
+
+
+
+```{r}
+dat_int_dsem_proj %>% summary()
+# quick check that we are matching assessment duration #
+dat_int_dsem_proj %>% dim() #
+
+# plotting tentative
+dat_int_dsem_proj %>% select(-recdevs) %>% mutate(year=1970:(2023+ny_proj)) %>% pivot_longer(-year) %>% 
+  mutate(name=factor(name,levels=c("SST","Copepod","Euph","Larvae","OffYOY","inYOY" ))) %>% 
+  ggplot(aes(year,value))+ geom_point()+
+  geom_line() + facet_wrap(~name)
+
+```
+
+
+### SEM statement + data
+
+```{r}
+## prepare data using dsem package
+sem = "
+  # link, lag, param_name, start_value
+
+  #internal data relation
+  SST -> SST,1,AR1
+  Larvae -> Larvae,1,AR2
+  Copepod -> Copepod,1,AR3
+  OffYOY -> OffYOY,1,AR4
+  inYOY -> inYOY,1,AR5
+  Euph -> Euph,1,AR6
+  recdevs <-> recdevs, 0, sigmaR, 1
+
+  #causal relation
+  SST -> Larvae, 0, SST_to_larvae#,1
+  Larvae -> OffYOY,0, larvae_to_offYOY#,1
+  Copepod -> OffYOY,0, copepod_to_offYOY#,1
+  Euph -> OffYOY, 0, euph_to_offYOY#,1
+  OffYOY -> inYOY, 0, offYOY_to_inYOY#,1
+  inYOY -> recdevs, 1,inYOY_to_R#,1
+  # Euph  -> recdevs, 1, euphausiid_to_R#,1
+"
+
+family <- rep('fixed', ncol(dat_int_dsem_proj))
+control <- dsem_control(use_REML=FALSE, run_model=FALSE)
+# fit_null_dsem_proj = dsem(sem=sem, tsdata=ts(dat_int_dsem_proj), family=family, control=control)
+# dsem:::summary.dsem(fit_null_dsem)
+
+```
+
+
+
+## 4.1 TEST WITH USUAL ASSESSMENT CODE
+
+
+```{r}
+#run model
+input_assess_usual_proj <- prepare_pk_input(path='../source', modfile='goa_pk_tmb',
+                          datfile='../data/2023/pk23_10.txt', version='sigmaR')
+
+input_assess_usual_proj$map$sigmaR <- factor(1) # estimate
+input_assess_usual_proj$pars$dev_log_recruit_proj <- rep(0,ny_proj)
+input_assess_usual_proj$random <- c('dev_log_recruit','dev_log_recruit_proj') 
+# input_assess_usual_proj$random <- 'dev_log_recruit' # recdevs
+input_assess_usual_proj$dat$Ftarget <- rep(0.2630716,ny_proj)
+
+# decreasing influence of spawner survey
+input_assess_usual_proj$dat$indxsurv_log_sd4 <- input_assess_usual_proj$dat$indxsurv_log_sd4*5
+input_assess_usual_proj$dat$indxsurv_log_sd5 <- input_assess_usual_proj$dat$indxsurv_log_sd5*5
+
+# dyn.unload(dynlib('source/goa_pk_tmb'))
+# compile('../source/goa_pk_tmb.cpp')
+# dyn.load(dynlib('../source/goa_pk_tmb'))
+fit_assess_usual_proj_new <- fit_pk(input=input_assess_usual_proj, getsd=TRUE, 
+newtonsteps=1,save.sdrep = TRUE,filename = NULL)#'Ass_usual_proj_dropidx.RDS')
+# fit_assess_usual$opt$objective
+
+```
+
+
+```{r}
+# fit_assess_usual_proj <- readRDS("../source/Ass_usual_proj.RDS")
+fit_assess_usual_proj <- readRDS("../source/Ass_usual_proj_dropidx.RDS")
+```
+
+```{r}
+get_std(fits=list(a=fit_assess_usual_proj,
+                  b=fit_assess_usual_proj_new,
+                  c=fit_assess_dsem_proj_dropidx)) %>% 
+  filter(name %in% c('log_recruit_proj','log_recruit')) %>% 
+   mutate(year=ifelse(name=='log_recruit',year,year+54)) %>% 
+  ggplot(aes(x=year,y=est,ymin=upr,ymax=lwr))+geom_line(aes(col=version))+
+  geom_ribbon(aes(fill=version),alpha=0.2)+
+  labs(y="log_recruit")+theme(legend.position='bottom')
+
+```
+
+
+## 4.2 TRY TO PROJECT WITH DSEM
+ 
+
+### Rec data from usual model
+
+```{r}
+fit_assess_usual <- readRDS("../source/Ass_usual.RDS")
+
+dat_ext_dsem_proj <- dat_int_dsem_proj %>%  
+  mutate(recdevs=c(fit_assess_usual$sd %>% filter(name=='dev_log_recruit') %>% pull(est),rep(NA,ny_proj))) 
+
+##new data set with recdevs from dropidx model
+
+fit_assess_usual_dropidx <- readRDS("../source/Ass_usual_dropidx.RDS")
+
+dat_ext_dsem_proj_dropidx <- dat_int_dsem_proj %>%  
+  mutate(recdevs=c(fit_assess_usual_dropidx$sd %>% filter(name=='dev_log_recruit') %>% pull(est),rep(NA,ny_proj))) 
+
+```
+
+### Model
+
+
+```{r}
+## prepare using package
+family <- rep('fixed', ncol(dat_ext_dsem_proj_dropidx))
+
+control <- dsem_control(use_REML=FALSE, run_model=TRUE,
+                        getsd=TRUE, trace=100, newton_loops=0)
+
+fit_ext_dsem_proj <- dsem(sem=sem, tsdata=ts(dat_ext_dsem_proj), family=family,
+                     estimate_delta0=FALSE, control=control)
+fit_ext_dsem_proj$version <- 'extDsem'
+class(fit_ext_dsem_proj)
+
+fit_ext_dsem_proj_dropidx <- dsem(sem=sem, tsdata=ts(dat_ext_dsem_proj_dropidx), family=family,
+                     estimate_delta0=FALSE, control=control)
+fit_ext_dsem_proj_dropidx$version <- 'extDsem_dropidx'
+class(fit_ext_dsem_proj_dropidx)
+
+```
+
+### Time series plot
+
+```{r}
+ParHat_ext_dsem_proj = fit_ext_dsem_proj$obj$env$parList()#;ParHat
+oldpar <- par(no.readonly = TRUE)
+par( mfcol=c(ncol(dat_ext_dsem_proj),1), mar=c(2,2,2,0), mgp=c(2,0.5,0), tck=-0.02 )
+for(i in 1:ncol(dat_ext_dsem_proj)){
+  tmp = dat_ext_dsem2_proj[,i,drop=FALSE]
+  tmp = cbind( tmp, "PSEM"=ParHat$x_tj[,i] )
+  SD = as.list(fit_ext_dsem_proj$sdrep,what="Std.")$x_tj[,i]
+  tmp = cbind( tmp, outer(tmp[,2],c(1,1)) +
+                 outer(ifelse(is.na(SD),0,SD),c(-1,1)) )
+  #
+  plot( x=1970:(2023+ny_proj), y=tmp[,1], ylim=range(tmp,na.rm=TRUE),
+        type="p", main=colnames(dat_ext_dsem2_proj)[i], pch=20, cex=2 )
+  lines( x=1970:(2023+ny_proj), y=tmp[,2], type="l", lwd=2,
+         col="blue", lty="solid" )
+  polygon( x=c(1970:(2023+ny_proj),rev(1970:(2023+ny_proj))),
+           y=c(tmp[,3],rev(tmp[,4])), col=rgb(0,0,1,0.2), border=NA )
+}
+
+```
+
+
+
+
+## 4.3 TRY PROJ WITH ASSESS-DSEM
+
+### Data pk
+
+```{r}
+
+input_assess <- prepare_pk_input(path="../source", modfile='goa_pk_dsem',
+                                 datfile='../data/2023/pk23_10.txt', version='dsem_proj_drop_age1.2_idx')#
+
+
+## stack on the dsem inputs to the assessment ones
+input_int_dsem_proj <- input_assess
+input_int_dsem_proj$dat <- c(input_assess$dat, fit_null_dsem_proj$tmb_inputs$dat,resimulate_gmrf=1)
+# summary(input_int_dsem$dat)
+input_int_dsem_proj$dat$y_tj[,1] <- NA # so not counted in NLL? already done i think
+input_int_dsem_proj$pars <- c(input_assess$pars, fit_null_dsem_proj$tmb_inputs$parameters)
+input_int_dsem_proj$map <- c(input_assess$map, fit_null_dsem_proj$tmb_inputs$map)
+input_int_dsem_proj$map$mu_j <- factor(c(NA,2:ncol(dat_int_dsem_proj))) ## ??? ### map off recdev mean since already a parameter
+input_int_dsem_proj$pars$mu_j[1] <- 0
+input_int_dsem_proj$map$sigmaR <- NULL ## took out of model
+input_int_dsem_proj$random <- c(input_assess$random, fit_null_dsem_proj$tmb_inputs$random)
+input_int_dsem_proj$dat$Ftarget <- rep(0.2630716,ny_proj)
+# input_int_dsem %>% summary()
+input_int_dsem_proj$dat$indxsurv_log_sd4 <- input_assess$dat$indxsurv_log_sd4*5
+input_int_dsem_proj$dat$indxsurv_log_sd5 <- input_assess$dat$indxsurv_log_sd5*5
+
+```
+
+### Model
+
+```{r}
+#fit
+# before fitting compile should have been done and ddl uploaded
+# dyn.unload(dynlib('source/goa_pk_dsem'))
+# compile('../source/goa_pk_dsem.cpp')
+# dyn.load(dynlib('../source/goa_pk_dsem'))
+fit_assess_dsem_proj <- fit_pk(input=input_int_dsem_proj, getsd=1, newtonsteps=1, do.fit=1,save.sdrep = TRUE,filename = NULL)
+# fit_assess_dsem_proj2 <- fit_pk(input=input_int_dsem_proj, getsd=1, newtonsteps=1, do.fit=1,save.sdrep = TRUE,filename = "AssDsem_proj_dropidx.RDS")
+
+
+```
+### Verif few things
+
+```{r}
+fit_assess_dsem_proj$sd %>% pull(name) %>% unique()
+# compare values of x_tj(,1) and vectors log_rec_dev and Log_recruit_proj
+fit_assess_dsem_proj$sd %>% filter(name=='x_tj') %>% filter(year<2023+ny_proj)
+
+
+## for hindcast part
+a= fit_assess_dsem_proj$sd %>% filter(name=='x_tj') %>% filter(year<=2023) %>% pull(est)
+
+b1 = fit_assess_dsem_proj$sd %>% filter(name=='log_recruit') %>% pull(est) 
+b2 = fit_assess_dsem_proj$sd %>% filter(name=='mean_log_recruit') %>% pull(est)
+b=b1-b2
+a==b
+a-b
+
+## forcast part
+c= fit_assess_dsem_proj$sd %>% filter(name=='x_tj') %>% filter(year>2023,year<=(2023+ny_proj)) %>% pull(est)
+length(c) == ny_proj
+
+d1= fit_assess_dsem_proj$sd %>% filter(name=='log_recruit_proj') %>% pull(est) 
+d= d1-b2
+
+c==d
+c-d
+
+## check I am not overlaping
+b[length(b)];d[1]
+b;d
+```
+
+## 4.4 COMPARE RESULTS
+
+```{r}
+
+fit_assess_usual_proj <- readRDS("../source/Ass_usual_proj.RDS")
+fit_assess_usual_proj_dropidx <- readRDS("../source/Ass_usual_proj_dropidx.RDS")
+
+fit_assess_dsem_proj<- readRDS("../source/AssDsem_proj.RDS")
+class(fit_assess_dsem_proj) <- c(class(fit_assess_dsem_proj),'assessdsem')
+fit_assess_dsem_proj$sem_full <- fit_ext_dsem_proj$sem_full
+
+fit_assess_dsem_proj_dropidx <- readRDS("../source/AssDsem_proj_dropidx.RDS")
+class(fit_assess_dsem_proj_dropidx) <- c(class(fit_assess_dsem_proj_dropidx),'assessdsem')
+fit_assess_dsem_proj_dropidx$sem_full <-   fit_ext_dsem_proj_dropidx$sem_full
+
+```
+
+
+#### Recuitment projection: AssessUsual / AssessDsem
+
+```{r}
+
+# fit_assess_dsem_proj$sd %>% 
+#   filter(name%in%c('log_recruit_proj','log_recruit')) %>% 
+#   mutate(fit="wo_Dsem_proj") %>% 
+#   bind_rows(fit_assess_dsem_proj4$sd %>% filter(name%in%c('recruit_proj','recruit')) %>% 
+#               mutate(fit='w_Dsem_proj')) %>%
+#   bind_rows(fit_assess_dsem_proj5$sd %>% filter(name%in%c('recruit_proj','recruit')) %>% 
+#               mutate(fit='w_Dsem_proj_corrected')) %>% 
+#   mutate(year=ifelse(name=='recruit',year,year+54)) %>% 
+#   ggplot(aes(x=year,y=est,ymin=upr,ymax=lwr))+geom_line(aes(col=fit))+
+#   geom_ribbon(aes(fill=fit),alpha=0.2)
+# 
+# fit_assess_dsem_proj$sd %>% 
+#   filter(name%in%c('log_recruit_proj','log_recruit')) %>% 
+#   mutate(year=ifelse(name=='log_recruit',year,year+54)) %>% 
+#   ggplot(aes(x=year,y=exp(est),ymin=exp(upr),ymax=exp(lwr)))+geom_line()+
+#   geom_ribbon(alpha=0.2)
+# 
+
+get_std(fits=list(a=fit_assess_usual_proj,
+                  b=fit_assess_dsem_proj,
+                  c=fit_assess_dsem_proj_dropidx)) %>% 
+  filter(name %in% c('log_recruit_proj','log_recruit')) %>% 
+   mutate(year=ifelse(name=='log_recruit',year,year+54)) %>% 
+  ggplot(aes(x=year,y=est,ymin=upr,ymax=lwr))+geom_line(aes(col=version))+
+  geom_ribbon(aes(fill=version),alpha=0.2)+
+  labs(y="log_recruit")
+
+```
+
+
+#### Recuitment projection: ExtDsem / AssessDsem / AssessUsual
+
+```{r}
+# 
+# as.list(fit_ext_dsem2$sdrep,what="Std.")$x_tj %>% as.data.frame() %>% 
+#   mutate(year=duration) %>% pivot_longer(-year,values_to = "stde") %>% 
+#   full_join(parHat_ext_Dsem$x_tj %>% as.data.frame() %>% 
+#   mutate(year=duration) %>% pivot_longer(-year,values_to = "est")) %>% 
+#   mutate(lwr=est-qnorm(0.975)*stde,
+#          upr=est+qnorm(0.975)*stde,
+#          type=ifelse(is.na(stde),'data','estimation'),
+#          model='ExtDsem') %>%
+#   select(-stde)
+  
+mean_log_rec <- fit_assess_dsem_proj_dropidx$sd %>% filter(name=='mean_log_recruit') %>% pull(est)
+ParHat_ext_dsem_proj = fit_ext_dsem_proj$obj$env$parList()#;ParHat
+  
+bb <- data_frame(name="", est=ParHat_ext_dsem_proj$x_tj[,1]+mean_log_rec,
+           se=as.list(fit_ext_dsem_proj$sdrep,what="Std.")$x_tj %>%
+           as.data.frame() %>% pull(recdevs),#+mean_log_rec,
+                year=1970:(2023+ny_proj)) %>% 
+       mutate(lwr=est-qnorm(0.975)*se,
+          upr=est+qnorm(0.975)*se,
+          version="extDsem") %>% 
+       # mutate(est=est+b2) %>% 
+  bind_rows(get_std(fits=list(a=fit_assess_usual_proj,
+                  b=fit_assess_dsem_proj_dropidx)) %>% 
+  filter(name %in% c('log_recruit_proj','log_recruit')) %>% 
+   mutate(year=ifelse(name=='log_recruit',year,year+54)) ) %>% 
+   ggplot(aes(x=year,y=est,ymin=upr,ymax=lwr))+
+    geom_line(aes(col=version))+
+    geom_ribbon(aes(fill=version),alpha=0.2)+
+    labs(y="log_recruit")
+bb
+
+```
+
+#### Assessment parameters estimation
+
+```{r}
+fit_assess_usual_proj_dropidx$version <- 'sigmaR_dropidx'
+fit_assess_usual_proj_dropidx$sd$version <- 'sigmaR_dropidx'
+
+get_std(fits=list(a=fit_assess_dsem_proj,b=fit_assess_dsem_proj_dropidx)) %>% 
+            filter(name=='beta_z') %>% filter(year==1970) %>% 
+  bind_rows(get_std(fits=list(fit_assess_usual_proj,fit_assess_usual_proj_dropidx)) %>% 
+    filter(name=='sigmaR')) %>% 
+  
+  ggplot(aes(x=version,ymin=lwr,y=est,ymax=upr))+geom_pointrange()+
+  coord_flip()
+
+```
+
+
+
+#### Causal maps from AssessDsem/AssessDsem_dropidx
+
+```{r}
+# source('AssDsem_fns.R')
+p1_new = plot( (as_fitted_DAG_assDsem(fit_null_dsem = fit_null_dsem_proj,fit=fit_assess_dsem_proj)), edge.width=1, type="width",
+           text_size=4, show.legend=FALSE,
+           arrow = grid::arrow(type='closed', 18, grid::unit(10,'points')) ) +
+  scale_x_continuous(expand = c(0.4, 0.1));p1_new
+
+p1_old = plot( (as_fitted_DAG_assDsem(fit_null_dsem = fit_null_dsem_proj,fit=fit_assess_dsem_proj_dropidx)), edge.width=1, type="width",
+               text_size=4, show.legend=FALSE,
+               arrow = grid::arrow(type='closed', 18, grid::unit(10,'points')) ) +
+  scale_x_continuous(expand = c(0.4, 0.1));p1_old
+# p1$layers[[1]]$mapping$edge_width = 1
+
+p2_new = plot(  (as_fitted_DAG_assDsem(fit_null_dsem = fit_null_dsem_proj,fit=fit_assess_dsem_proj,what = 'p_value')), edge.width=1, type="width",
+           text_size=4, show.legend=FALSE, colors=c('black', 'black'),
+           arrow = grid::arrow(type='closed', 18, grid::unit(10,'points')) ) +
+  scale_x_continuous(expand = c(0.4, 0.1));p2_new
+
+p2_old = plot(  (as_fitted_DAG_assDsem(fit_null_dsem = fit_null_dsem_proj,fit=fit_assess_dsem_proj_dropidx,what = 'p_value')), edge.width=1, type="width",
+                text_size=4, show.legend=FALSE, colors=c('black', 'black'),
+                arrow = grid::arrow(type='closed', 18, grid::unit(10,'points')) ) +
+  scale_x_continuous(expand = c(0.4, 0.1))
+
+
+ggarrange(p1_new, p1_old,p2_new,p2_old,
+          labels = c("AssessDsem_proj", "AssessDsem_proj_dropidx"),
+          ncol = 2, nrow = 2)
+
+```
+
+ 
+#### ESP ST ExtDSEM / AssessDsem / AssessDsem-dropidx
+
+
+```{r}
+duration_proj <- c(duration,(duration[length(duration)]+1):(duration[length(duration)]+ny_proj))
+
+plot_comp_ST_proj <- #grabbing 2 AssessDsem fits std
+  get_std(fits=list(a=fit_assess_dsem_proj,b=fit_assess_dsem_proj_dropidx)) %>% 
+  filter(name=='x_tj') %>% #pull(version) %>% unique() 
+  mutate(name=rep(c(rep('recdevs',54+ny_proj),rep('SST',length(which(is.na(dat_int_dsem_proj$SST)))),
+                rep('Copepod',length(which(is.na(dat_int_dsem_proj$Copepod)))),
+                rep('Euph',length(which(is.na(dat_int_dsem_proj$Euph)))),
+                rep('Larvae',length(which(is.na(dat_int_dsem_proj$Larvae)))),
+                rep('OffYOY',length(which(is.na(dat_int_dsem_proj$OffYOY)))),
+                rep('inYOY',length(which(is.na(dat_int_dsem_proj$inYOY))))),time=2)) %>% 
+  mutate(year=rep(c(duration_proj[which(is.na(dat_int_dsem_proj$recdevs))],
+                duration_proj[which(is.na(dat_int_dsem_proj$SST))],
+                duration_proj[which(is.na(dat_int_dsem_proj$Copepod))],
+                duration_proj[which(is.na(dat_int_dsem_proj$Euph))],
+                duration_proj[which(is.na(dat_int_dsem_proj$Larvae))],
+                duration_proj[which(is.na(dat_int_dsem_proj$OffYOY))],
+                duration_proj[which(is.na(dat_int_dsem_proj$inYOY))]),time=2)) %>% 
+  mutate(type="estimation") %>%
+  select(name,est,year,se,lwr,upr,type,version) %>% 
+  
+  # adding input data to fill the gaps
+  bind_rows(dat_int_dsem_proj %>% 
+              mutate(year=duration_proj) %>% pivot_longer(cols=-year) %>% 
+              filter(!is.na(value)) %>% dplyr::rename('est'=value) %>% 
+              mutate(type="data",version='dsem_proj')) %>%
+  
+  # doing it twice to make the plotting easier
+   bind_rows(dat_int_dsem_proj %>% 
+              mutate(year=duration_proj) %>% pivot_longer(cols=-year) %>% 
+              filter(!is.na(value)) %>% dplyr::rename('est'=value) %>% 
+              mutate(type="data",version='dsem_proj_drop_age1.2_idx')) %>% 
+  
+  # adding ExtDsem for comparison
+  # bind_rows(as.list(fit_ext_dsem_proj$sdrep,what="Std.")$x_tj %>% as.data.frame() %>%
+  # mutate(year=duration_proj) %>% pivot_longer(-year,values_to = "se") %>%
+  # full_join(as.list(fit_ext_dsem_proj$sdrep,what="Estimate")$x_tj %>% as.data.frame() %>%
+  # mutate(year=duration_proj) %>% pivot_longer(-year,values_to = "est"),by=join_by(year, name)) %>%
+  # mutate(lwr=est-qnorm(0.975)*se,
+  #        upr=est+qnorm(0.975)*se,
+  #        type=ifelse(is.na(se),'data','estimation'),
+  #        version='ExtDsem_proj')) %>% 
+  
+  ##adding another ExtDSEM
+    bind_rows(as.list(fit_ext_dsem_proj_dropidx$sdrep,what="Std.")$x_tj %>% as.data.frame() %>%
+  mutate(year=duration_proj) %>% pivot_longer(-year,values_to = "se") %>%
+  full_join(as.list(fit_ext_dsem_proj_dropidx$sdrep,what="Estimate")$x_tj %>% as.data.frame() %>%
+  mutate(year=duration_proj) %>% pivot_longer(-year,values_to = "est"),by=join_by(year, name)) %>%
+  mutate(lwr=est-qnorm(0.975)*se,
+         upr=est+qnorm(0.975)*se,
+         type=ifelse(is.na(se),'data','estimation'),
+         version='ExtDsem_proj_dropidx')) %>%
+
+    #last stuff
+  filter(name!='recdevs') %>% #,model!='AssessDsem') %>% 
+  mutate(name=factor(name,levels=c("SST","Copepod","Euph","Larvae","OffYOY","inYOY" ))) %>%
+  
+  #plot
+  ggplot()+geom_point(aes(year,est,col=version,shape=type))+
+  geom_line(aes(year,est,col=version))+
+  facet_wrap(~name)+
+  geom_ribbon(aes(year,ymin=lwr,ymax=upr,fill=version,col=version),alpha=0.2)+
+  theme(legend.position = 'bottom')+
+  scale_shape_manual(values=c(19,1))
+plot_comp_ST_proj        
+
+
+```
+
+#### Dsem parameter estimation
+
+for now missing a bit more info on which coef mean what
+
+```{r}
+source("AssessDsem_fns.R")
+
+#mutate(kiki=matrix(unlist(strsplit(path," ")),nrow=19,byrow=T)[,1]) %>% #param=ifelse()
+as_fitted_DAG_assDsem(fit_null_dsem = fit_null_dsem_proj,
+                      fit = fit_assess_dsem_proj,
+                      out.type = 'other',
+                      what = 'Estimate') %>% #dim()
+            mutate(model=fit_assess_dsem_proj$version) %>% 
+  bind_rows(as_fitted_DAG_assDsem(fit_null_dsem = fit_null_dsem_proj,
+                      fit = fit_assess_dsem_proj2,
+                      out.type = 'other',
+                      what = 'Estimate') %>% 
+            mutate(model=fit_assess_dsem_proj2$version)) %>% 
+  bind_rows(as_fitted_DAG_multLag(fit = fit_ext_dsem_proj,
+                      out.type = 'other',
+                      what = 'Estimate') %>% 
+             mutate(model='Ext_Dsem'))  %>% 
+  mutate(lwr=Estimate-qnorm(0.975)*Std_Error,upr=Estimate+qnorm(0.975)*Std_Error) %>% 
+  mutate(param=ifelse(first!=second,'causal_link',
+                        ifelse(direction==1,'AR1correlation','variance'))) %>% 
+  ggplot(aes(x=path,y=Estimate,ymin=lwr,ymax=upr,col=model))+
+    geom_pointrange(position=position_dodge(width=1)) +
+    facet_wrap(~param,ncol=3)+
+    geom_hline(yintercept = 0)+
+    coord_flip()+theme(legend.position='bottom')
+
+```
+
+# 5. NEW TRIES
+
+```{r}
+duration = 1970:2023
+ny_proj=15
+```
+
+## updating dataset
+
+```{r}
+
+dat1 <- dat0 %>% #dim()
+  dplyr::rename('Heatwave'= 'Annual_Heatwave_GOA_Model',
+         'Spr_SST' = 'Spring_Temperature_Surface_WCGOA_Satellite',
+         'Sum_SBT' = 'Summer_Temperature_Bottom_GOA_Survey',
+         'Spr_WindDir_Kodiak' = 'Spring_Wind_Direction_Kodiak_Buoy',
+         'Spr_ChlA_Biomass' = 'Spring_Chlorophylla_Biomass_WCGOA_Satellite',
+         'Spr_ChlA_Peak' = 'Spring_Chlorophylla_Peak_WCGOA_Satellite',
+         'Spr_SCopepod_Shelikof' = 'Spring_Small_Copepod_Abundance_Shelikof_Survey',
+         'Sum_LCopepod_Shelikof' = 'Summer_Large_Copepod_Abundance_Shelikof_Survey',
+         'Sum_Euph_Kodiak' = 'Summer_Euphausiid_Abundance_Kodiak_Survey',
+         'Aucklet_ReproSuccess' = 'Annual_Auklet_Reproductive_Success_Chowiet_Survey',
+         'Spr_Larvae_Shelikof' = 'Spring_Pollock_CPUE_Larvae_Shelikof_Survey',
+         'Sum_OffYOY_Shelikof' = 'Summer_Pollock_CPUE_YOY_Shelikof_Survey',
+         'Sum_OffYOY_Cond_Shelikof' = 'Summer_Pollock_Condition_YOY_Shelikof_Survey',
+         'Sum_NearYOY_Kodiak' = 'Summer_Pollock_CPUE_YOY_Nearshore_Kodiak_Survey',
+         'Annual_Pollock_RelBiomass_Aiktak' = 'Annual_Pollock_Relative_Biomass_Aiktak_Survey',
+         'Sum_Pollock_MTconsumed_Age1_GOA_Model' = 'Summer_Pollock_MTconsumed_Age1_GOA_Model',
+         'Sum_Juv_EuphDiet' = 'Summer_Pollock_Euphausiid_Diet_Juvenile_GOA_Survey',
+         'Fal_Adult_Cond_Fishery' = 'Fall_Pollock_Condition_Adult_GOA_Fishery',
+         'Win_Adult_Cond_Survey' = 'Winter_Pollock_Condition_Adult_GOA_Survey',
+         'Sum_Pollock_Center_Gravity_Northeast_WCGOA_Model' = 'Summer_Pollock_Center_Gravity_Northeast_WCGOA_Model',
+         'Sum_Pollock_Area_Occupied_WCGOA_Model' = 'Summer_Pollock_Area_Occupied_WCGOA_Model',
+         'Arrowtooth_Biomass' = 'Annual_Arrowtooth_Biomass_GOA_Model',
+         'POP_Biomass' = 'Annual_Pacific_Ocean_Perch_Biomass_GOA_Model',
+         'Sablefish_Biomass' = 'Annual_Sablefish_Biomass_GOA_Model',
+         'AdultSeaLion' = 'Annual_Steller_Sea_Lion_Adult_GOA_Survey')# %>% names()
+
+```
+
+
+## 5.1 Redo latest analysis with new function
+
+### Data trimming
+
+```{r}
+var_of_interest2 <- c(3,9,10,12,13,15)#;names(dat1)[var_of_interest2]
+ESPdata_DAG1 <- bind_rows(data.frame(Year=c(1970:1976)), dat1[,-1]) %>%
+  select(c(all_of(var_of_interest2))) %>%# names()
+  mutate_all(.funs =scale ) %>%
+  add_row(Spr_SST=rep(NA,ny_proj))
+
+```
+
+### SEM statement
+
+DAG1 = https://docs.google.com/presentation/d/1zd3F-9f3XWbWrHq1bNYlICWt-MRQWol5/edit#slide=id.g26bbffea2a2_1_0 
+but with Euph only to OffYOY to simplify (they are sampled at the same time/survey?)
+
+```{r}
+
+sem_DAG1 = "
+  # link, lag, param_name, start_value
+
+  #internal data relation
+  Spr_SST -> Spr_SST,1,AR1
+  Spr_Larvae_Shelikof -> Spr_Larvae_Shelikof,1,AR2
+  Sum_LCopepod_Shelikof -> Sum_LCopepod_Shelikof,1,AR3
+  Sum_OffYOY_Shelikof -> Sum_OffYOY_Shelikof,1,AR4
+  Sum_NearYOY_Kodiak -> Sum_NearYOY_Kodiak,1,AR5
+  Sum_Euph_Kodiak -> Sum_Euph_Kodiak,1,AR6
+  recdevs <-> recdevs, 0, sigmaR, 1
+
+  #causal relation
+  Spr_SST -> Spr_Larvae_Shelikof, 0, SST_to_larvae#,1
+  Spr_Larvae_Shelikof -> Sum_OffYOY_Shelikof,0, larvae_to_offYOY#,1
+  Sum_LCopepod_Shelikof -> Sum_OffYOY_Shelikof,0, copepod_to_offYOY#,1
+  Sum_Euph_Kodiak  -> Sum_OffYOY_Shelikof, 0, euph_to_offYOY#,1
+  Sum_OffYOY_Shelikof -> Sum_NearYOY_Kodiak, 0, offYOY_to_nearYOY#,1
+  #Sum_Euph_Kodiak  -> Sum_NearYOY_Kodiak, 0, euph_to_nearYOY#,1
+  Sum_NearYOY_Kodiak -> recdevs, 1,nearYOY_to_R#,1
+  #Sum_Euph_Kodiak  -> recdevs, 1, euph_to_R#,1
+"
+
+# family <- rep('fixed', ncol(ESPdata_DAG1))
+# control <- dsem_control(use_REML=FALSE, run_model=FALSE)
+#fit_null_dsem = dsem(sem=sem, tsdata=ts(ESPdata_DAG1), family=family, control=control)
+# dsem:::summary.dsem(fit_null_dsem)
+
+```
+
+
+### Model runs
+
+NB: now the standard assessment run is the one dropping some of the indices. so it is not mentionned in run names anymore.
+
+```{r}
+
+fit_assess_usual <- AssessDsem_fit(fit_type = "AssessOnly",
+                             fit_name = '' ,
+                             ESPdata=ESPdata_DAG1,
+                             sem=NULL,#sem_DAG1,
+                             sem_family =NULL,#  rep('fixed', ncol(ESPdata)+1),
+                             ny_proj=ny_proj,
+                             Assess_recdevs= NULL,
+                             save_fit = FALSE)
+
+
+fit_ext_dsem_DAG1 <- AssessDsem_fit(fit_type = "ExtDsem",
+                             fit_name = '_DAG1' ,
+                             ESPdata=ESPdata_DAG1,
+                             sem=sem_DAG1,
+                             sem_family =  rep('fixed', ncol(ESPdata_DAG1)+1),
+                             ny_proj=ny_proj,
+                             Assess_recdevs= fit_assess_usual$sd %>% filter(name=='dev_log_recruit') %>% pull(est),
+                             save_fit = FALSE)
+
+
+fit_assess_dsem_DAG1 <- AssessDsem_fit(fit_type = "AssessDsem",
+                             fit_name = '_DAG1' ,
+                             ESPdata=ESPdata_DAG1,
+                             sem=sem_DAG1,
+                             sem_family =  rep('fixed', ncol(ESPdata_DAG1)+1),
+                             ny_proj=ny_proj,
+                             Assess_recdevs= NULL,
+                             save_fit = FALSE)
+```
+
+
+### Comparison with previous runs
+
+#### Usual run
+
+```{r}
+
+#fit_assess_usual_proj_dropidx <- readRDS("../source/Ass_usual_proj_dropidx.RDS")
+
+fit_assess_usual_proj_dropidx;fit_assess_usual
+
+get_std(list(fit_assess_usual_proj_dropidx,fit_assess_usual)) %>% filter(name %in% c('log_recruit','log_recruit_proj')) %>% 
+  mutate(year=ifelse(name=='log_recruit',year,year+54)) %>% 
+  ggplot(aes(x=year,y=est,ymin=lwr,ymax=upr))+geom_line(aes(col=version))+geom_ribbon(aes(fill=version),alpha=0.2)
+
+rec_plot(fits=list(fit_assess_usual_proj_dropidx,fit_assess_usual))
+
+sigmaR_plot(fits=list(fit_assess_usual_proj_dropidx,fit_assess_usual))
+```
+
+OK both are identical
+
+#### ExtDsem run
+
+```{r}
+
+plot(as_fitted_DAG_assessdsem(fit_ext_dsem_DAG1))
+as_fitted_DAG_assessdsem(fit_ext_dsem_DAG1)
+as_fitted_DAG_assessdsem(fit_ext_dsem_proj_dropidx)
+
+causal_plot(fits=list(fit_ext_dsem_proj_dropidx,fit_ext_dsem_DAG1),fit_label = c('old','new'))
+```
+
+OK both are identical
+
+#### AssessDsem run
+
+```{r}
+fit_assess_dsem_proj_dropidx <- readRDS("../source/AssDsem_proj_dropidx.RDS")
+class(fit_assess_dsem_proj_dropidx) <- c(class(fit_assess_dsem_proj_dropidx),'assessdsem')
+fit_assess_dsem_proj_dropidx$sem_full <-   fit_ext_dsem_proj_dropidx$sem_full
+
+rec_plot(fits=list(fit_assess_dsem_proj_dropidx,fit_assess_dsem_DAG1))
+
+sigmaR_plot(fits=list(fit_assess_dsem_proj_dropidx,fit_assess_dsem_DAG1))
+
+as_fitted_DAG_assessdsem(fit_assess_dsem_proj_dropidx)
+as_fitted_DAG_assessdsem(fit_assess_dsem_DAG1)
+
+causal_plot(fits=list(fit_assess_dsem_proj_dropidx,fit_assess_dsem_DAG1),fit_label = c(fit_assess_dsem_proj_dropidx$version,fit_assess_dsem_DAG1$version))
+
+
+```
+
+
+OK both are identical
+
+### Comparison among each other
+
+
+#### Rec plot
+
+```{r}
+
+get_std(list(fit_assess_usual,fit_assess_dsem_DAG1)) %>% filter(name=="mean_log_recruit")
+get_std(list(fit_assess_usual,fit_assess_dsem_DAG1)) %>% filter(name=="log_recruit")
+
+
+rec_plot(fits=list(fit_assess_usual,fit_assess_dsem_DAG1,fit_ext_dsem_DAG1),
+         mean_log_rec =fit_assess_dsem_DAG1$sd %>% filter(name=="mean_log_recruit") %>% pull(est))
+
+rec_plot(fits=list(fit_assess_usual,fit_assess_dsem_DAG1))
+
+```
+
+#### Sigma plot
+
+```{r}
+
+sigmaR_plot(fits=list(fit_assess_usual,fit_assess_dsem_DAG1))
+
+compute_var_red(new_fit = fit_assess_dsem_DAG1,ref_fit = fit_assess_usual)
+```
+
+#### SEM parameter estimation
+
+```{r}
+dsem_par_plot(fits=list(fit_ext_dsem_DAG1,fit_assess_dsem_DAG1))
+
+dsem_par_plot(fits=list(fit_ext_dsem_DAG1,fit_assess_dsem_DAG1),what='causal')
+
+dsem_par_plot(fits=list(fit_ext_dsem_DAG1,fit_assess_dsem_DAG1),what='AR1')
+
+dsem_par_plot(fits=list(fit_ext_dsem_DAG1,fit_assess_dsem_DAG1),what='variance')
+
+as_fitted_DAG_assessdsem(fit_assess_dsem_DAG1,out.type = 'table',which.link = 'all')
+
+```
+
+
+#### DAG plot
+
+```{r}
+
+causal_plot(fits=list(fit_ext_dsem_DAG1,fit_assess_dsem_DAG1),fit_label = c(fit_ext_dsem_DAG1$version,fit_assess_dsem_DAG1$version))
+
+```
+#### Estimated ESP ST
+
+```{r}
+duration_proj <- c(duration,(duration[length(duration)]+1):(duration[length(duration)]+ny_proj))
+
+plot_comp_ST_proj <- #grabbing AssessDsem fit std
+  fit_assess_dsem_DAG1$sd %>%  
+  filter(name=='x_tj') %>% #pull(version) %>% unique() 
+  mutate(name=rep(c(rep('recdevs',54+ny_proj),rep('Spr_SST',length(which(is.na(ESPdata_DAG1$Spr_SST)))),
+                rep('Sum_LCopepod_Shelikof',length(which(is.na(ESPdata_DAG1$Sum_LCopepod_Shelikof)))),
+                rep('Sum_Euph_Kodiak',length(which(is.na(ESPdata_DAG1$Sum_Euph_Kodiak)))),
+                rep('Spr_Larvae_Shelikof',length(which(is.na(ESPdata_DAG1$Spr_Larvae_Shelikof)))),
+                rep('Sum_OffYOY_Shelikof',length(which(is.na(ESPdata_DAG1$Sum_OffYOY_Shelikof)))),
+                rep('Sum_NearYOY_Kodiak',length(which(is.na(ESPdata_DAG1$Sum_NearYOY_Kodiak))))),time=1)) %>% 
+  mutate(year=rep(c(duration_proj,
+                duration_proj[which(is.na(ESPdata_DAG1$Spr_SST))],
+                duration_proj[which(is.na(ESPdata_DAG1$Sum_LCopepod_Shelikof))],
+                duration_proj[which(is.na(ESPdata_DAG1$Sum_Euph_Kodiak))],
+                duration_proj[which(is.na(ESPdata_DAG1$Spr_Larvae_Shelikof))],
+                duration_proj[which(is.na(ESPdata_DAG1$Sum_OffYOY_Shelikof))],
+                duration_proj[which(is.na(ESPdata_DAG1$Sum_NearYOY_Kodiak))]),time=1)) %>% 
+  mutate(type="estimation") %>%
+  select(name,est,year,se,lwr,upr,type,version) %>% 
+  
+  # adding input data to fill the gaps
+  bind_rows(ESPdata_DAG1 %>% 
+              mutate(year=duration_proj) %>% pivot_longer(cols=-year) %>% 
+              filter(!is.na(value)) %>% dplyr::rename('est'=value) %>% 
+              mutate(type="data",version=fit_assess_dsem_DAG1$version)) %>%
+  
+  ##adding another ExtDSEM
+    bind_rows(as.list(fit_ext_dsem_DAG1$sdrep,what="Std.")$x_tj %>% as.data.frame() %>%
+  mutate(year=duration_proj) %>% pivot_longer(-year,values_to = "se") %>%
+  full_join(as.list(fit_ext_dsem_DAG1$sdrep,what="Estimate")$x_tj %>% as.data.frame() %>%
+  mutate(year=duration_proj) %>% pivot_longer(-year,values_to = "est"),by=join_by(year, name)) %>%
+  mutate(lwr=est-qnorm(0.975)*se,
+         upr=est+qnorm(0.975)*se,
+         type=ifelse(is.na(se),'data','estimation'),
+         version=fit_ext_dsem_DAG1$version)) %>%
+
+    #last stuff
+  filter(name!='recdevs') %>% #,model!='AssessDsem') %>% 
+  mutate(name=factor(name,levels=c("Spr_SST","Sum_LCopepod_Shelikof","Sum_Euph_Kodiak","Spr_Larvae_Shelikof","Sum_OffYOY_Shelikof","Sum_NearYOY_Kodiak" ))) %>%
+  
+  #plot
+  ggplot()+geom_point(aes(year,est,col=version,shape=type))+
+  geom_line(aes(year,est,col=version))+
+  facet_wrap(~name)+
+  geom_ribbon(aes(year,ymin=lwr,ymax=upr,fill=version,col=version),alpha=0.2)+
+  theme(legend.position = 'bottom')+
+  scale_shape_manual(values=c(19,1))
+plot_comp_ST_proj        
+
+```
+
+
+## 5.2 NEW DAG = 2 more links from euph to NearYOY and recdev
+
+
+### Dataset 
+
+```{r}
+var_of_interest2 <- c(3,9,10,12,13,15)#;names(dat1)[var_of_interest2]
+ESPdata_DAG2 <- bind_rows(data.frame(Year=c(1970:1976)), dat1[,-1]) %>%
+  select(c(all_of(var_of_interest2))) %>%# names()
+  mutate_all(.funs =scale ) %>%
+  add_row(Spr_SST=rep(NA,ny_proj))
+
+```
+
+### SEM statement
+
+DAG2 = https://docs.google.com/presentation/d/1zd3F-9f3XWbWrHq1bNYlICWt-MRQWol5/edit#slide=id.g26bbffea2a2_1_0 
+
+
+```{r}
+
+sem_DAG2 = "
+  # link, lag, param_name, start_value
+
+  #internal data relation
+  Spr_SST -> Spr_SST,1,AR1
+  Spr_Larvae_Shelikof -> Spr_Larvae_Shelikof,1,AR2
+  Sum_LCopepod_Shelikof -> Sum_LCopepod_Shelikof,1,AR3
+  Sum_OffYOY_Shelikof -> Sum_OffYOY_Shelikof,1,AR4
+  Sum_NearYOY_Kodiak -> Sum_NearYOY_Kodiak,1,AR5
+  Sum_Euph_Kodiak -> Sum_Euph_Kodiak,1,AR6
+  recdevs <-> recdevs, 0, sigmaR, 1
+
+  #causal relation
+  Spr_SST -> Spr_Larvae_Shelikof, 0, SST_to_larvae#,1
+  Spr_Larvae_Shelikof -> Sum_OffYOY_Shelikof,0, larvae_to_offYOY#,1
+  Sum_LCopepod_Shelikof -> Sum_OffYOY_Shelikof,0, copepod_to_offYOY#,1
+  Sum_Euph_Kodiak  -> Sum_OffYOY_Shelikof, 0, euph_to_offYOY#,1
+  Sum_OffYOY_Shelikof -> Sum_NearYOY_Kodiak, 0, offYOY_to_nearYOY#,1
+  Sum_Euph_Kodiak  -> Sum_NearYOY_Kodiak, 0, euph_to_nearYOY#,1
+  Sum_NearYOY_Kodiak -> recdevs, 1,nearYOY_to_R#,1
+  Sum_Euph_Kodiak  -> recdevs, 1, euph_to_R#,1
+"
+
+```
+
+
+### Model runs
+
+```{r}
+fit_ext_dsem_DAG2 <- AssessDsem_fit(fit_type = "ExtDsem",
+                             fit_name = '_DAG2' ,
+                             ESPdata=ESPdata_DAG2,
+                             sem=sem_DAG2,
+                             sem_family =  rep('fixed', ncol(ESPdata_DAG2)+1),
+                             ny_proj=ny_proj,
+                             Assess_recdevs= fit_assess_usual$sd %>% filter(name=='dev_log_recruit') %>% pull(est),
+                             save_fit = FALSE)
+fit_ext_dsem_DAG2$opt$convergence
+summary(fit_ext_dsem_DAG2)
+as_fitted_DAG_assessdsem(fit_ext_dsem_DAG2,out.type = '',whic)
+
+
+fit_assess_dsem_DAG2 <- AssessDsem_fit(fit_type = "AssessDsem",
+                             fit_name = '_DAG2' ,
+                             ESPdata=ESPdata_DAG2,
+                             sem=sem_DAG2,
+                             sem_family =  rep('fixed', ncol(ESPdata_DAG2)+1),
+                             ny_proj=ny_proj,
+                             Assess_recdevs= NULL,
+                             save_fit = FALSE,
+                             newtonsteps=2)
+
+fit_assess_dsem_DAG2$opt$Convergence_check
+
+fit_assess_dsem_DAG2$opt$diagnostics %>% filter(final_gradient>(10^-4)) %>% pull(Param) %>% unique()#max(final_gradient)
+
+fit_assess_dsem_DAG1$opt$diagnostics %>% filter(Param=='inf1_fsh_dev')
+```
+# 5.3 ANOTHER DAG: SST > Larvae > recdev
+
+### Dataset 
+
+```{r}
+var_of_interest3 <- c(3,12)#;names(dat1)[var_of_interest2]
+ESPdata_DAG3 <- bind_rows(data.frame(Year=c(1970:1976)), dat1[,-1]) %>%
+  select(c(all_of(var_of_interest3))) %>%# names()
+  mutate_all(.funs =scale ) %>%
+  add_row(Spr_SST=rep(NA,ny_proj))
+
+```
+
+### SEM statement
+
+A very simplified version of 
+DAG2 = https://docs.google.com/presentation/d/1zd3F-9f3XWbWrHq1bNYlICWt-MRQWol5/edit#slide=id.g26bbffea2a2_1_0 
+
+
+```{r}
+
+sem_DAG3 = "
+  # link, lag, param_name, start_value
+
+  #internal data relation
+  Spr_SST -> Spr_SST,1,AR1
+  Spr_Larvae_Shelikof -> Spr_Larvae_Shelikof,1,AR2
+  recdevs <-> recdevs, 0, sigmaR, 1
+
+  #causal relation
+  Spr_SST -> Spr_Larvae_Shelikof, 0, SST_to_larvae#,1
+  Spr_Larvae_Shelikof -> recdevs, 1, Larvae_to_R#,1
+"
+
+```
+
+
+### Model runs
+
+```{r}
+fit_ext_dsem_DAG3 <- AssessDsem_fit(fit_type = "ExtDsem",
+                             fit_name = '_DAG3' ,
+                             ESPdata=ESPdata_DAG3,
+                             sem=sem_DAG3,
+                             sem_family =  rep('fixed', ncol(ESPdata_DAG3)+1),
+                             ny_proj=ny_proj,
+                             Assess_recdevs= fit_assess_usual$sd %>% filter(name=='dev_log_recruit') %>% pull(est),
+                             save_fit = FALSE)
+
+fit_ext_dsem_DAG3$opt$convergence
+
+
+
+fit_assess_dsem_DAG3 <- AssessDsem_fit(fit_type = "AssessDsem",
+                             fit_name = '_DAG3' ,
+                             ESPdata=ESPdata_DAG3,
+                             sem=sem_DAG3,
+                             sem_family =  rep('fixed', ncol(ESPdata_DAG3)+1),
+                             ny_proj=ny_proj,
+                             Assess_recdevs= NULL,
+                             save_fit = FALSE,
+                             newtonsteps=1)
+
+fit_assess_dsem_DAG3$opt$Convergence_check
+
+
+```
+### Comp Rec plot
+
+```{r}
+
+rec_plot(fits=list(fit_assess_usual,fit_assess_dsem_DAG1,fit_assess_dsem_DAG3))
+
+```
+
+#### Sigma plot
+
+```{r}
+
+sigmaR_plot(fits=list(fit_assess_usual,fit_assess_dsem_DAG1,fit_assess_dsem_DAG3))
+
+compute_var_red(new_fit = fit_assess_dsem_DAG1,ref_fit = fit_assess_usual)
+compute_var_red(new_fit = fit_assess_dsem_DAG3,ref_fit = fit_assess_usual)
+```
+
+#### SEM parameter estimation
+
+```{r}
+dsem_par_plot(fits=list(fit_ext_dsem_DAG3,fit_assess_dsem_DAG1,fit_assess_dsem_DAG3))
+
+# dsem_par_plot(fits=list(fit_ext_dsem_DAG1,fit_assess_dsem_DAG1),what=='causal')
+# 
+# dsem_par_plot(fits=list(fit_ext_dsem_DAG1,fit_assess_dsem_DAG1),what=='AR1')
+# 
+# dsem_par_plot(fits=list(fit_ext_dsem_DAG1,fit_assess_dsem_DAG1),what=='variance')
+# 
+# as_fitted_DAG_assessdsem(fit_assess_dsem_DAG1,out.type = 'table',which.link = 'all')
+
+```
+
+
+#### DAG plot
+
+```{r}
+
+causal_plot(fits=list(fit_ext_dsem_DAG3,fit_assess_dsem_DAG3,fit_assess_dsem_DAG1),fit_label = c(fit_ext_dsem_DAG3$version,fit_assess_dsem_DAG3$version,fit_assess_dsem_DAG1$version))
+
+```
+
+# 5.4 Intermediary DAG: SST > L > Off > Near > Rec
+
+### Data trimming
+
+```{r}
+var_of_interest4 <- c(3,12,13,15)#;names(dat1)[var_of_interest4]
+ESPdata_DAG4 <- bind_rows(data.frame(Year=c(1970:1976)), dat1[,-1]) %>%
+  select(c(all_of(var_of_interest4))) %>%# names()
+  mutate_all(.funs =scale ) %>%
+  add_row(Spr_SST=rep(NA,ny_proj))
+
+```
+
+### SEM statement
+
+Simplified, but all pollock stage: SST > L > Off > Near > Rec
+ https://docs.google.com/presentation/d/1zd3F-9f3XWbWrHq1bNYlICWt-MRQWol5/edit#slide=id.g26bbffea2a2_1_0 
+
+
+```{r}
+
+sem_DAG4 = "
+  # link, lag, param_name, start_value
+
+  #internal data relation
+  Spr_SST -> Spr_SST,1,AR1
+  Spr_Larvae_Shelikof -> Spr_Larvae_Shelikof,1,AR2
+  Sum_OffYOY_Shelikof -> Sum_OffYOY_Shelikof,1,AR3
+  Sum_NearYOY_Kodiak -> Sum_NearYOY_Kodiak,1,AR5
+  recdevs <-> recdevs, 0, sigmaR, 1
+
+  #causal relation
+  Spr_SST -> Spr_Larvae_Shelikof, 0, SST_to_larvae#,1
+  Spr_Larvae_Shelikof -> Sum_OffYOY_Shelikof,0, larvae_to_offYOY#,1
+  Sum_OffYOY_Shelikof -> Sum_NearYOY_Kodiak, 0, offYOY_to_nearYOY#,1
+  Sum_NearYOY_Kodiak -> recdevs, 1,nearYOY_to_R#,1
+  "
+
+```
+
+
+### Model runs
+
+```{r}
+
+
+fit_ext_dsem_DAG4 <- AssessDsem_fit(fit_type = "ExtDsem",
+                             fit_name = '_DAG4' ,
+                             ESPdata=ESPdata_DAG4,
+                             sem=sem_DAG4,
+                             sem_family =  rep('fixed', ncol(ESPdata_DAG4)+1),
+                             ny_proj=ny_proj,
+                             Assess_recdevs= fit_assess_usual$sd %>% filter(name=='dev_log_recruit') %>% pull(est),
+                             save_fit = FALSE)
+
+
+fit_assess_dsem_DAG4 <- AssessDsem_fit(fit_type = "AssessDsem",
+                             fit_name = '_DAG4' ,
+                             ESPdata=ESPdata_DAG4,
+                             sem=sem_DAG4,
+                             sem_family =  rep('fixed', ncol(ESPdata_DAG4)+1),
+                             ny_proj=ny_proj,
+                             Assess_recdevs= NULL,
+                             save_fit = FALSE)
+
+fit_assess_dsem_DAG4$opt$Convergence_check
+
+```
+
+
+### Comp Rec plot
+
+```{r}
+
+rec_plot(fits=list(fit_assess_usual,fit_assess_dsem_DAG1,fit_assess_dsem_DAG3,fit_assess_dsem_DAG4))
+
+# rec_plot(fits=list(fit_assess_usual_newproj2,fit_assess_dsem_DAG1,fit_assess_dsem_DAG3,fit_assess_dsem_DAG4),points=T)
+# 
+```
+
+#### Sigma plot
+
+```{r}
+
+sigmaR_plot(fits=list(fit_assess_usual,fit_assess_dsem_DAG1,fit_assess_dsem_DAG3,fit_assess_dsem_DAG4))
+
+compute_var_red(new_fit = fit_assess_dsem_DAG1,ref_fit = fit_assess_usual)
+compute_var_red(new_fit = fit_assess_dsem_DAG3,ref_fit = fit_assess_usual)
+compute_var_red(new_fit = fit_assess_dsem_DAG4,ref_fit = fit_assess_usual)
+```
+
+#### SEM parameter estimation
+
+```{r}
+dsem_par_plot(fits=list(fit_ext_dsem_DAG3,fit_assess_dsem_DAG1,fit_assess_dsem_DAG3))
+
+dsem_par_plot(fits=list(fit_ext_dsem_DAG1,fit_assess_dsem_DAG1),what='causal')
+# 
+dsem_par_plot(fits=list(fit_assess_dsem_DAG1,fit_assess_dsem_DAG3,fit_assess_dsem_DAG4),what='AR1')
+# 
+# dsem_par_plot(fits=list(fit_ext_dsem_DAG1,fit_assess_dsem_DAG1),what='variance')
+# 
+# as_fitted_DAG_assessdsem(fit_assess_dsem_DAG1,out.type = 'table',which.link = 'all')
+
+```
+
+
+#### DAG plot
+
+```{r}
+
+causal_plot(fits=list(fit_ext_dsem_DAG3,fit_assess_dsem_DAG3,fit_assess_dsem_DAG1),fit_label = c(fit_ext_dsem_DAG3$version,fit_assess_dsem_DAG3$version,fit_assess_dsem_DAG1$version))
+
+causal_plot(fits=list(fit_assess_dsem_DAG3,fit_assess_dsem_DAG4,fit_assess_dsem_DAG1),fit_label = c(fit_assess_dsem_DAG3$version,fit_assess_dsem_DAG4$version,fit_assess_dsem_DAG1$version))
+
+
+causal_plot(fits=list(fit_assess_dsem_DAG3,fit_assess_dsem_DAG4),fit_label = c(fit_assess_dsem_DAG3$version,fit_assess_dsem_DAG4$version))
+
+```
+## 5.5 New DAG based on BAS variable
+
+2019 heatwave, ATF, fall pollock condition
+2020 spring SST, spring larvae cpue, fall pollock condition, ATF 
+2021 spring SST, spring larvae cpue, fall pollock condition, ATF 
+2022 spring SST, spring larvae cpue, fall pollock condition, sablefish, POP, ATF
+2023 spring SST and fall pollock condition 
+
+# 6. SOME CHANGES
+
+
+## 6.1 MODIFY RECRUITMENT PROJECTIONS IN USUAL ASSESSMENT CODE
+
+
+```{r}
+#run model
+input_assess_usual_proj <- prepare_pk_input(path='../source', modfile='goa_pk_tmb',
+                          datfile='../data/2023/pk23_10.txt', version='sigmaR_newproj2')
+
+input_assess_usual_proj$map$sigmaR <- factor(1) # estimate
+input_assess_usual_proj$pars$dev_log_recruit_proj <- rep(0,ny_proj)
+input_assess_usual_proj$random <- c('dev_log_recruit','dev_log_recruit_proj') 
+# input_assess_usual_proj$random <- 'dev_log_recruit' # recdevs
+input_assess_usual_proj$dat$Ftarget <- rep(0.2630716,ny_proj)
+
+# decreasing influence of spawner survey
+input_assess_usual_proj$dat$indxsurv_log_sd4 <- input_assess_usual_proj$dat$indxsurv_log_sd4*5
+input_assess_usual_proj$dat$indxsurv_log_sd5 <- input_assess_usual_proj$dat$indxsurv_log_sd5*5
+
+# dyn.unload(dynlib('source/goa_pk_tmb'))
+# compile('../source/goa_pk_tmb.cpp')
+# dyn.load(dynlib('../source/goa_pk_tmb'))
+fit_assess_usual_newproj2 <- fit_pk(input=input_assess_usual_proj, getsd=TRUE, 
+newtonsteps=1,save.sdrep = TRUE,filename = NULL)#'Ass_usual_proj_dropidx.RDS')
+# fit_assess_usual$opt$objective
+
+```
+
+
+```{r}
+# fit_assess_usual_proj <- readRDS("../source/Ass_usual_proj.RDS")
+fit_assess_usual_proj <- readRDS("../source/Ass_usual_proj_dropidx.RDS")
+```
+
+```{r}
+get_std(fits=list(
+                  # a=fit_assess_usual_proj,
+                  # b=fit_assess_usual_newproj,
+                  d=fit_assess_usual_newproj2,
+                  c=fit_assess_dsem_DAG1)) %>% 
+  filter(name %in% c('log_recruit_proj','log_recruit')) %>% 
+   mutate(year=ifelse(name=='log_recruit',year,year+54)) %>% 
+  ggplot(aes(x=year,y=est,ymin=upr,ymax=lwr))+geom_line(aes(col=version))+
+  geom_ribbon(aes(fill=version),alpha=0.2)+
+  geom_vline(aes(xintercept = 2023))+
+  labs(y="log_recruit")+theme(legend.position='bottom')
+
+```
+
+### check estimate with and wo epsilon biais correction
+
+```{r}
+
+# need to decompose steps of fit_pk
+# input, getsd=TRUE, ,control=NULL, do.fit=TRUE, use_bounds=FALSE, save.sdrep=FALSE,
+
+input = input_assess_usual_proj
+newtonsteps=1
+
+  cpp <- paste0(file.path(input$path, input$modfile),'.cpp')
+  obj <- MakeADFun(data=input$dat, parameters=input$pars,
+                   map=input$map, random=input$random,
+                   DLL=input$modfile, silent=TRUE)
+  lwr <- -Inf; upr <- Inf
+  control <- list(eval.max=10000, iter.max=10000, trace=100)
+  ## optimize and compare
+  opt <- TMBhelper::fit_tmb(obj, control=control,
+                            newtonsteps=newtonsteps, getsd=FALSE,
+                            lower=lwr, upper=upr)
+  rep <- c(version=input$version, obj$report())
+  sdrep <- std <- NULL
+  
+  #turn in biais correction here, not working? 
+  sdrep <- sdreport(fit_assess_usual_newproj2$obj, bias.correct=TRUE , bias.correct.control=list(sd=TRUE ))
+  summary(std, "report")  
+  std <- summary(sdrep)
+  summary(std)
+  
+  
+  std <- data.frame(dimnames(std)[[1]], std)
+  names(std) <- c('name', 'est', 'se')
+  row.names(std) <- NULL
+  std <- group_by(std, name) %>%
+    mutate(year=1969+1:n(), lwr=est-1.96*se,
+           upr=est+1.96*se, version=input$version) %>%
+  ungroup
+  
+  parList <- obj$env$parList()
+  
+  fit <- list(version=input$version, path=input$path,
+              modfile=input$modfile, rep=rep, opt=opt, sd=std,
+              obj=obj, parList=parList, input=input,sdrep=sdrep)
+
+
+
+# SD = TMB::sdreport( Obj, bias.correct=TRUE )
+```
+
+
+## 6.2 Difference between 2 assessDsem cpp
+
+in relation with old and new run from part 3.2a and 3.2b
+ "new" / other cpp code
+
+```{r}
+
+input_assess <- prepare_pk_input(path="../source", modfile='goa_pk_dsem2',
+                                 datfile='../data/2023/pk23_10.txt', version='AssessDsem_othercpp')
+
+
+## stack on the dsem inputs to the assessment ones
+input_int_dsem_proj <- input_assess
+input_int_dsem_proj$dat <- c(input_assess$dat, fit_null_dsem_proj$tmb_inputs$dat)
+# summary(input_int_dsem$dat)
+input_int_dsem_proj$dat$y_tj[,1] <- NA # lready done i think
+input_int_dsem_proj$pars <- c(input_assess$pars, fit_null_dsem_proj$tmb_inputs$parameters)
+input_int_dsem_proj$map <- c(input_assess$map, fit_null_dsem_proj$tmb_inputs$map)
+input_int_dsem_proj$map$mu_j <- factor(c(1:ncol(dat_int_dsem_proj))) ##
+#input_int_dsem_proj$pars$mu_j[1] <- 0
+input_int_dsem_proj$map$sigmaR <- NULL ## took out of model
+input_int_dsem_proj$random <- c(input_assess$random, fit_null_dsem_proj$tmb_inputs$random)
+input_int_dsem_proj$dat$Ftarget <- rep(0.2630716,ny_proj)
+# input_int_dsem %>% summary()
+input_int_dsem_proj$dat$indxsurv_log_sd4 <- input_assess$dat$indxsurv_log_sd4*5
+input_int_dsem_proj$dat$indxsurv_log_sd5 <- input_assess$dat$indxsurv_log_sd5*5
+
+```
+
+```{r}
+#fit
+# before fitting compile should have been done and ddl uploaded
+# dyn.unload(dynlib('source/goa_pk_dsem2'))
+# compile('../source/goa_pk_dsem2.cpp')
+# dyn.load(dynlib('../source/goa_pk_dsem2'))
+fit_assess_dsem_othercpp <- fit_pk(input=input_int_dsem_proj,newtonsteps=1, save.sdrep = TRUE,filename = NULL)
+
+class(fit_assess_dsem_othercpp) <- c(class(fit_assess_dsem_othercpp),'assessdsem')
+fit_assess_dsem_othercpp$sem_full <-   fit_null_dsem_proj$sem_full
+
+```
+
+```{r}
+get_std(fits=list(a=fit_assess_dsem_proj,
+                  #c=fit_assess_dsem_DAG1,
+                  b=fit_assess_dsem_othercpp)) %>% 
+  filter(name %in% c('log_recruit_proj','log_recruit')) %>% 
+   mutate(year=ifelse(name=='log_recruit',year,year+54)) %>% 
+  ggplot(aes(x=year,y=est,ymin=upr,ymax=lwr))+geom_line(aes(col=version))+
+  geom_ribbon(aes(fill=version),alpha=0.2)+
+  labs(y="log_recruit")+theme(legend.position='bottom')
+
+get_std(fits=list(a=fit_assess_dsem_proj,
+                  #c=fit_assess_dsem_DAG1,
+                  b=fit_assess_dsem_othercpp)) %>% 
+  filter(name %in% c('dev_log_recruit')) %>% 
+   mutate(year=ifelse(name=='log_recruit',year,year+54)) %>% 
+  ggplot(aes(x=year,y=est,ymin=upr,ymax=lwr))+geom_line(aes(col=version))+
+  geom_ribbon(aes(fill=version),alpha=0.2)+
+  labs(y="dev_log_recruit")+theme(legend.position='bottom')
+
+```
+
+```{r}
+cp <- causal_plot(fits=list(a=fit_assess_dsem_proj,#c=fit_assess_dsem_DAG1,
+                  b=fit_assess_dsem_othercpp),fit_label = c('actual_cpp','other_cpp'))
+cp
+```
+
+
+```{r}
+fit_assess_dsem_proj$sd %>% filter(name=='mean_log_recruit')
+get_std(fits=list(a=fit_assess_dsem_proj,
+                  #c=fit_assess_dsem_DAG1,
+                  b=fit_assess_dsem_othercpp)) %>% #pull(name) %>% unique()
+  filter(name %in% c('mean_log_recruit')) 
+
+```
+
+
+```{r}
+get_std(fits=list(a=fit_assess_dsem_proj,b=fit_assess_dsem_othercpp)) %>%
+  filter(name=='beta_z') %>% filter(year==1970)
+```
+
+
+## 6.3 TRY EXT-DSEM SIMULATION 
+
+### Based on tmb.simulate()
+
+```{r}
+
+fit_ext_dsem_DAG1$obj$simulate()
+
+
+fit_ext_dsem_DAG1$obj$simulate()$y_tj
+
+
+Sim = sapply (1:100 , FUN = function (i) fit_ext_dsem_DAG1$obj$simulate()$y_tj )
+
+Sim %>% summary()
+Sim %>% dim()
+```
+
+### Based on R with simulate.dsem() 
+
+```{r}
+
+
+ext_dsem_sim <- simulate(object = fit_ext_dsem_DAG1,nsim=2,seed=444, resimulate_gmrf = TRUE)
+
+ext_dsem_sim2 <- simulate(object = fit_ext_dsem_DAG1,nsim=2,seed=444, resimulate_gmrf = FALSE)
+
+ext_dsem_sim3 <- simulate(object = fit_ext_dsem_DAG1,nsim=2,seed=444,variance = 'none', resimulate_gmrf = FALSE)
+ext_dsem_sim4 <- simulate(object = fit_ext_dsem_DAG1,nsim=2,variance = 'random', resimulate_gmrf = FALSE)
+# ext_dsem_sim5 <- simulate(object = fit_ext_dsem_DAG1,nsim=2,seed=444,variance = 'both', resimulate_gmrf = FALSE)
+
+# comp default and variance= 'none'
+as.data.frame(ext_dsem_sim2[[1]]) == as.data.frame(ext_dsem_sim3[[1]]) 
+
+# comp default and variance= 'random'
+as.data.frame(ext_dsem_sim2[[1]]) == as.data.frame(ext_dsem_sim4[[1]]) 
+
+#Comp default and varaince = both
+as.data.frame(ext_dsem_sim2[[1]]) == as.data.frame(ext_otherdsem_sim5[[1]]) 
+
+#comp default and resimulate_gmrf=TRUE
+as.data.frame(ext_dsem_sim2[[1]]) == as.data.frame(ext_dsem_sim[[1]]) 
+
+#comp default simulate sim 1 and 2
+as.data.frame(ext_dsem_sim2[[1]]) == as.data.frame(ext_dsem_sim2[[2]]) 
+
+#comp simulate variance= 'none' sim 1 and 2
+as.data.frame(ext_dsem_sim3[[1]]) == as.data.frame(ext_dsem_sim3[[2]]) 
+
+#comp simulate variance= 'random' sim 1 and 2
+as.data.frame(ext_dsem_sim4[[1]]) == as.data.frame(ext_dsem_sim4[[2]]) 
+
+#comp simulate variance= 'both' sim 1 and 2
+as.data.frame(ext_otherdsem_sim5[[1]]) == as.data.frame(ext_otherdsem_sim5[[2]]) 
+
+#comp simulate resimulate_gmrf=TRUE sim 1 and 2
+as.data.frame(ext_dsem_sim[[1]]) == as.data.frame(ext_dsem_sim[[2]]) 
+
+
+ext_dsem_sim[[1]]
+```
+
+From what I understand here
+variance = none/random/both => all the same for now -> maybe because I don't have ME turn on (but what is the link between ME and RE?)
+with or wo a particular seed set every simulation you're doing is going to be the same
+for both you need to have a fit with getJointPrecision = TRUE -> not sure why for now
+resimulate_gmrf = T gives different simulations
+
+
+
+```{r}
+# fit_assess_usual_dropidx <- readRDS("../source/Ass_usual_dropidx.RDS")
+
+dat_ext_dsem_proj_dropidx <- dat_int_dsem_proj %>%  
+  mutate(recdevs=c(fit_assess_usual_dropidx$sd %>% filter(name=='dev_log_recruit') %>% pull(est),rep(NA,ny_proj))) 
+
+family <- rep('fixed', ncol(dat_ext_dsem_proj_dropidx))
+
+control <- dsem_control(use_REML=FALSE, run_model=TRUE,
+                        getsd=TRUE, trace=100, newton_loops=0,getJointPrecision = TRUE)
+
+fit_ext_dsem_proj_dropidx <- dsem(sem=sem, tsdata=ts(dat_ext_dsem_proj_dropidx), family=family,
+                     estimate_delta0=FALSE, control=control)
+fit_ext_dsem_proj_dropidx$version <- 'extDsem'
+
+ext_otherdsem_sim5 <- simulate(object = fit_ext_dsem_proj_dropidx,nsim=2,variance = 'both', resimulate_gmrf = FALSE)
+
+
+as.data.frame(ext_otherdsem_sim5[[1]]) == as.data.frame(ext_otherdsem_sim5[[2]]) 
+
+```
+
+### Re fit a dsem model based on the simulated
+
+```{r}
+
+ext_otherdsem_sim1 <- simulate(object = fit_ext_dsem_proj_dropidx,nsim=2,seed=445,variance = 'none', resimulate_gmrf = TRUE)
+ext_otherdsem_sim2 <- simulate(object = fit_ext_dsem_proj_dropidx,nsim=2,seed=445,variance = 'random', resimulate_gmrf = TRUE)
+ext_otherdsem_sim3 <- simulate(object = fit_ext_dsem_proj_dropidx,nsim=2,seed=445,variance = 'both', resimulate_gmrf = TRUE)
+
+# do.call('rbind',ext_otherdsem_sim1)
+duration_wproj = c(duration,(max(duration)+1):(max(duration)+ny_proj))
+
+plotp <- as.data.frame(ext_otherdsem_sim1[[1]]) %>% 
+  mutate(year=duration_wproj,type='none') %>% 
+  bind_rows(as.data.frame(ext_otherdsem_sim2[[1]]) %>% 
+  mutate(year=duration_wproj,type='random')) %>% 
+  bind_rows(as.data.frame(ext_otherdsem_sim3[[1]]) %>% 
+  mutate(year=duration_wproj,type='both')) %>% 
+  pivot_longer(cols=-c(year,type)) %>% 
+  ggplot(aes(year,value,col=type))+geom_point()+geom_line()+facet_wrap(~name)
+plotp
+
+plotp2 <- as.data.frame(ext_otherdsem_sim1[[1]]) %>% 
+  mutate(year=duration_wproj,type='none',rep='1') %>% 
+  bind_rows(as.data.frame(ext_otherdsem_sim1[[2]]) %>% 
+  mutate(year=duration_wproj,type='none',rep='2')) %>% 
+  # bind_rows(as.data.frame(ext_otherdsem_sim3[[1]]) %>% 
+  # mutate(year=duration_wproj,type='both')) %>% 
+  pivot_longer(cols=-c(year,type,rep)) %>% 
+  ggplot(aes(year,value,col=rep))+geom_point()+geom_line()+facet_wrap(~name)
+plotp2
+
+```
+
+
+```{r}
+
+sem = "
+  # link, lag, param_name, start_value
+
+  #internal data relation
+  SST -> SST,1,AR1
+  Larvae -> Larvae,1,AR2
+  Copepod -> Copepod,1,AR3
+  OffYOY -> OffYOY,1,AR4
+  inYOY -> inYOY,1,AR5
+  Euph -> Euph,1,AR6
+  recdevs <-> recdevs, 0, sigmaR, 1
+
+  #causal relation
+  SST -> Larvae, 0, SST_to_larvae#,1
+  Larvae -> OffYOY,0, larvae_to_offYOY#,1
+  Copepod -> OffYOY,0, copepod_to_offYOY#,1
+  Euph -> OffYOY, 0, euph_to_offYOY#,1
+  OffYOY -> inYOY, 0, offYOY_to_inYOY#,1
+  inYOY -> recdevs, 1,inYOY_to_R#,1
+  # Euph  -> recdevs, 1, euphausiid_to_R#,1
+"
+
+# control <- dsem_control(use_REML=FALSE, run_model=TRUE,
+#                         getsd=TRUE, trace=100, newton_loops=0)
+family <- rep('fixed', ncol(dat_ext_dsem_proj_dropidx))
+
+control <- dsem_control(use_REML=FALSE, run_model=TRUE,
+                        getsd=TRUE, trace=100, newton_loops=0,getJointPrecision = TRUE)
+
+re_fit_extDsem1 <- dsem(sem=sem, tsdata=ts(ext_otherdsem_sim1[[2]]), family=family,
+                     estimate_delta0=FALSE, control=control)
+
+re_fit_extDsem2 <- dsem(sem=sem, tsdata=ts(ext_otherdsem_sim2[[2]]), family=family,
+                     estimate_delta0=FALSE, control=control)
+
+re_fit_extDsem3 <- dsem(sem=sem, tsdata=ts(ext_otherdsem_sim3[[2]]), family=family,
+                     estimate_delta0=FALSE, control=control)
+
+re_fit_extDsem1$version <- 'extDsem_refit_sim_var_none'
+re_fit_extDsem2$version <- 'extDsem_refit_sim_var_random'
+re_fit_extDsem3$version <- 'extDsem_refit_sim_var_both'
+
+
+```
+
+```{r}
+rcp <- causal_plot(list(fit_ext_dsem_proj_dropidx,re_fit_extDsem3),fit_label = c('initial','simu1'))
+rcp <- causal_plot(list(fit_ext_dsem_proj_dropidx,re_fit_extDsem1,re_fit_extDsem2,re_fit_extDsem3),fit_label = c('initial','simu-var-none','simu2-var-random','simu3-var-both'))
+rcp
+```
+NOT STABLE AT ALL !
+
+```{r}
+
+rec_plot(list(fit_ext_dsem_proj_dropidx,re_fit_extDsem1,re_fit_extDsem2,re_fit_extDsem3),mean_log_rec = rep(0,))
+```
+## 6.4 TRY ASSESSDSEM SIMULATION
+
+### Try with modificiation of cpp
+
+```{r}
+
+input_assess <- prepare_pk_input(path="../source", modfile='goa_pk_dsem',
+                                 datfile='../data/2023/pk23_10.txt', version='AssessDsem_trysimulate')#dsem_proj_drop_age1.2_idx
+
+
+## stack on the dsem inputs to the assessment ones
+input_int_dsem_proj <- input_assess
+input_int_dsem_proj$dat <- c(input_assess$dat, fit_null_dsem_proj$tmb_inputs$dat,resimulate_gmrf=1)
+# summary(input_int_dsem$dat)
+input_int_dsem_proj$dat$y_tj[,1] <- NA # so not counted in NLL? already done i think
+input_int_dsem_proj$pars <- c(input_assess$pars, fit_null_dsem_proj$tmb_inputs$parameters)
+input_int_dsem_proj$map <- c(input_assess$map, fit_null_dsem_proj$tmb_inputs$map)
+input_int_dsem_proj$map$mu_j <- factor(c(NA,2:ncol(dat_int_dsem_proj))) ## ??? ### map off recdev mean since already a parameter
+input_int_dsem_proj$pars$mu_j[1] <- 0
+input_int_dsem_proj$map$sigmaR <- NULL ## took out of model
+input_int_dsem_proj$random <- c(input_assess$random, fit_null_dsem_proj$tmb_inputs$random)
+input_int_dsem_proj$dat$Ftarget <- rep(0.2630716,ny_proj)
+# input_int_dsem %>% summary()
+input_int_dsem_proj$dat$indxsurv_log_sd4 <- input_assess$dat$indxsurv_log_sd4*5
+input_int_dsem_proj$dat$indxsurv_log_sd5 <- input_assess$dat$indxsurv_log_sd5*5
+
+```
+
+
+```{r}
+#fit
+# before fitting compile should have been done and ddl uploaded
+# dyn.unload(dynlib('source/goa_pk_dsem'))
+# compile('../source/goa_pk_dsem.cpp')
+# dyn.load(dynlib('../source/goa_pk_dsem'))
+fit_assess_dsem_proj2 <- fit_pk(input=input_int_dsem_proj, getsd=1, newtonsteps=1, do.fit=1,save.sdrep = TRUE,filename = NULL)
+# fit_assess_dsem_proj2 <- fit_pk(input=input_int_dsem_proj, getsd=1, newtonsteps=1, do.fit=1,save.sdrep = TRUE,filename = "AssDsem_proj_dropidx.RDS")
+
+fit_assess_dsem_proj$obj$simulate()$y_tj
+
+fit_assess_dsem_proj2$obj$simulate()$y_tj
+
+fit_assess_dsem_proj_dropidx$obj$simulate()
+
+fit_assess_dsem$obj$simulate()
+
+fit_assess_usual$obj$simulate()
+
+set.seed(1)
+fit_assess_dsem_DAG1$obj$simulate()$y_tj
+fit_assess_dsem_proj$obj$simulate()$y_tj
+
+
+```
+
+### Try a coumpound version
+
+```{r}
+fit_pk(..., do.fit=FALSE)
+obj=fit_pk(..,do.fit=FALSE)
+obj$simulate()
+parnew=obj$simulate()
+
+```
+
+## 6.5 GET A COMPLETE X_TJ MATRIX
+
+### Check what dsem does
+
+```{r}
+
+fit_ext_dsem_proj_dropidx$sdrep$value ## only z_tj - a new feature?
+
+fit_ext_dsem_proj_dropidx$opt$par
+ParHat = fit_ext_dsem_proj_dropidx$obj$env$parList()
+
+Prhat2 <- fit_assess_dsem_DAG1$obj$env$parList()
+
+Prhat2$x_tj
+
+SD = as.list(fit_ext_dsem_proj_dropidx$sdrep,what="Std.")$x_tj[,i]
+
+
+```
+
+
+# 7. SELF SIMULATON EXPERIMENT
+
+## 7.1 With  a very simple model no NA
+
+### Fit
+
+```{r}
+
+set.seed(12)
+sd <- .1
+N <- 100
+sim1 <- arima.sim(list(order = c(1,0,0), ar = 0.1), n = N)
+obs1 <- sim1 + rnorm(N,0,sd)
+sim2 <- arima.sim(list(order = c(1,0,0), ar = 0.95), n = N)
+obs2 <- sim2 + rnorm(N,0,sd)
+# obs1[1:5] <- NA
+# obs2[1:5] <- NA
+Z <- ts(data.frame(obs1=obs1, obs2=obs2))
+sem <- "
+  obs1 -> obs1, 1, AR1, .01
+  obs2 -> obs2, 1, AR2, .01
+"
+
+family <- rep('normal', ncol(Z))
+
+# first non fit
+control <- dsem_control(use_REML=TRUE, run_model=FALSE,quiet=TRUE, getJointPrecision = TRUE)
+fit_dsem_2TS_null = dsem(sem=sem, tsdata=Z, family=family, control=control )
+
+# new map and pars ## turn off estimation of obs error at specified value
+new_map = fit_dsem_2TS_null$tmb_inputs$map
+new_map$lnsigma_j <- factor(rep(NA, length=length(new_map$lnsigma_j)))
+new_pars <- fit_dsem_2TS_null$tmb_inputs$parameters
+new_pars$lnsigma_j <- rep(log(sd), length=length(new_pars$lnsigma_j))
+
+new_control=dsem_control(use_REML=TRUE, run_model=TRUE,quiet=TRUE, 
+                         getJointPrecision = TRUE,parameters=new_pars, map=new_map,)
+fit_dsem_2TS_noNA = dsem( sem=sem, tsdata=Z, family=family, control=new_control)
+
+Q <- fit_dsem_2TS_noNA$sdrep$jointPrecision
+Qinv <- cov2cor(solve(Q))
+
+# devtools::install_github.com('Cole-Monnahan-NOAA/dsem', ref='simulate_NAs')
+```
+
+
+### Simulation
+
+
+#### GMRF=F
+
+```{r}
+# /!\ 1000 c'est long
+nsims = 1000
+fit_dsem_2TS=fit_dsem_2TS_noNA#fit
+
+# sim_dsem_2TS_none2 <- simulate(object = fit_dsem_2TS,nsim=nsims,seed=12,variance = 'none', resimulate_gmrf = TRUE)
+sim_dsem_2TS_none3 <- simulate(object = fit_dsem_2TS,nsim=nsims,seed=12,variance = 'none', resimulate_gmrf = FALSE)
+
+# sim_dsem_2TS_random2 <- simulate(object = fit_dsem_2TS,nsim=nsims,seed=12,variance = 'random', resimulate_gmrf = TRUE)
+sim_dsem_2TS_random3 <- simulate(object = fit_dsem_2TS,nsim=nsims,seed=12,variance = 'random', resimulate_gmrf = FALSE)
+
+# sim_dsem_2TS_both2 <- simulate(object = fit_dsem_2TS,nsim=nsims,seed=12,variance = 'both', resimulate_gmrf = TRUE)
+sim_dsem_2TS_both3 <- simulate(object = fit_dsem_2TS,nsim=nsims,seed=12,variance = 'both', resimulate_gmrf = F)
+
+
+```
+
+#### GMRF=T
+
+```{r}
+# /!\ 1000 c'est long
+nsims = 100
+fit_dsem_2TS=fit_dsem_2TS_noNA#fit
+
+sim_dsem_2TS_none2 <- simulate(object = fit_dsem_2TS,nsim=nsims,seed=12,variance = 'none', resimulate_gmrf = TRUE)
+
+sim_dsem_2TS_random2 <- simulate(object = fit_dsem_2TS,nsim=nsims,seed=12,variance = 'random', resimulate_gmrf = TRUE)
+
+sim_dsem_2TS_both2 <- simulate(object = fit_dsem_2TS,nsim=nsims,seed=12,variance = 'both', resimulate_gmrf = TRUE)
+
+
+
+```
+
+
+```{r}
+
+# cbind(as.data.frame(sim_dsem_2TS_none2[[1]]),as.data.frame(sim_dsem_2TS_none2[[2]]))
+# cbind(as.data.frame(sim_dsem_2TS_none3[[1]]),as.data.frame(sim_dsem_2TS_none3[[2]]))
+# cbind(as.data.frame(sim_dsem_2TS_none3[[1]]),data.frame(obs1=obs1, obs2=obs2))
+# 
+# cbind(as.data.frame(sim_dsem_2TS_random2[[1]]),as.data.frame(sim_dsem_2TS_random2[[2]]))
+# cbind(as.data.frame(sim_dsem_2TS_random3[[1]]),as.data.frame(sim_dsem_2TS_random3[[2]]))
+# cbind(as.data.frame(sim_dsem_2TS_random3[[1]]),data.frame(obs1=obs1, obs2=obs2))
+# 
+# cbind(as.data.frame(sim_dsem_2TS_both2[[1]]),as.data.frame(sim_dsem_2TS_both2[[2]]))
+# cbind(as.data.frame(sim_dsem_2TS_both3[[1]]),as.data.frame(sim_dsem_2TS_both3[[2]]))
+# cbind(as.data.frame(sim_dsem_2TS_both3[[1]]),data.frame(obs1=obs1, obs2=obs2))
+# 
+# cbind(as.data.frame(sim_dsem_2TS_none[[1]]),data.frame(obs1=obs1, obs2=obs2))
+
+
+```
+
+### Compare trends
+
+####  with resimulated_GRMF=F
+
+```{r}
+
+max_simu = 1000
+
+sim_plot_woGMRF <- do.call('rbind',sim_dsem_2TS_none3[1:max_simu]) %>% 
+  as.data.frame() %>% 
+  mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='none',type='simu') %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_random3[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='random',type='simu')) %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_both3[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='both',type='simu')) %>% 
+  
+  # bind_rows(data.frame(obs1=obs1, obs2=obs2,Year=1:N,sim=0,variance='none',type='true')) %>% 
+  # bind_rows(data.frame(obs1=obs1, obs2=obs2,Year=1:N,sim=0,variance='random',type='true')) %>%  
+  # bind_rows(data.frame(obs1=obs1, obs2=obs2,Year=1:N,sim=0,variance='both',type='true')) %>% 
+  
+  pivot_longer(cols=c(obs1,obs2)) %>% #which(is.na(year))#summary()
+  mutate(variance=factor(variance,levels=c('none','random','both'))) %>% 
+  
+  ggplot()+
+  geom_line(aes(x=Year,value,col=type,group=sim,alpha=type))+#,linewidth=type,
+  # geom_boxplot(aes(x=Year,value,group=Year, col=type))+
+  facet_grid(name~variance)+
+  scale_alpha_manual(values=c(0.5,1))+
+  # scale_color_manual(values=c('grey','black'))#+
+  # scale_linewidth_manual(values=c(1,2))
+  geom_line(data=data.frame(obs1=obs1, obs2=obs2,Year=1:N,sim=0,type='true') %>% 
+              pivot_longer(cols=c(obs1,obs2)),aes(x=Year,value),col='black')+
+  theme(legend.position = 'none')
+
+sim_plot_woGMRF
+
+# relative variable value
+
+sim_plot_woGMRF_rel <- do.call('rbind',sim_dsem_2TS_none3[1:max_simu]) %>% 
+  as.data.frame() %>% 
+  mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),
+         variance='none',type='simu') %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_random3[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),
+           variance='random',type='simu')) %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_both3[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),
+           variance='both',type='simu')) %>% 
+  
+  # real data
+  bind_rows(data.frame(obs1=obs1, obs2=obs2,Year=1:N,sim=0,variance='none',type='true')) %>%
+  
+  pivot_longer(cols=c(obs1,obs2)) %>% #which(is.na(year))#summary()
+  mutate(relvalue=value[which(type=='true')]-value,
+         variance=factor(variance,levels=c('none','random','both'))) %>% 
+  filter(type=='simu') %>% 
+  
+  ggplot()+
+  geom_line(aes(x=Year,relvalue,group=sim,col=sim))+
+  # geom_boxplot(aes(x=Year,value,group=Year, col=type))+
+  facet_grid(name~variance)+
+  scale_alpha_manual(values=c(0.5,1))+
+  # scale_color_manual(values=c('grey','black'))#+
+  # scale_linewidth_manual(values=c(1,2))
+  theme(legend.position = 'none')
+
+sim_plot_woGMRF_rel
+
+
+```
+
+
+#### with resimulated_GRMF=T
+
+```{r}
+
+max_simu = 50
+
+sim_plot_wGMRF <- do.call('rbind',sim_dsem_2TS_none2[1:max_simu]) %>% 
+  as.data.frame() %>% 
+  mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='none',type='simu') %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_random2[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='random',type='simu')) %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_both2[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='both',type='simu')) %>% 
+  
+  bind_rows(data.frame(obs1=obs1, obs2=obs2,Year=1:N,sim=0,variance='none',type='true')) %>% 
+  bind_rows(data.frame(obs1=obs1, obs2=obs2,Year=1:N,sim=0,variance='random',type='true')) %>%  
+  bind_rows(data.frame(obs1=obs1, obs2=obs2,Year=1:N,sim=0,variance='both',type='true')) %>% 
+  
+  pivot_longer(cols=c(obs1,obs2)) %>%
+  mutate(variance=factor(variance,levels=c('none','random','both'))) %>% 
+  
+  ggplot()+geom_line(aes(x=Year,value,col=type,group=sim,alpha=type))+
+  facet_grid(name~variance,scale = "free_y")+
+  scale_alpha_manual(values=c(0.5,1))+
+  theme(legend.position = 'bottom')
+
+sim_plot_wGMRF
+
+
+sim_plot_wGMRF_rel <- do.call('rbind',sim_dsem_2TS_none2[1:max_simu]) %>% 
+  as.data.frame() %>% 
+  mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='none',type='simu') %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_random2[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='random',type='simu')) %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_both2[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='both',type='simu')) %>% 
+  
+  bind_rows(data.frame(obs1=obs1, obs2=obs2,Year=1:N,sim=0,variance='none',type='true')) %>% 
+  
+  pivot_longer(cols=c(obs1,obs2)) %>% 
+  mutate(relvalue=value[which(type=='true')]-value,
+         variance=factor(variance,levels=c('none','random','both'))) %>% 
+  filter(type!='true') %>% 
+  
+  ggplot()+geom_line(aes(x=Year,relvalue,col=sim,group=sim))+
+  facet_grid(name~variance)+
+  theme(legend.position = 'none')
+
+sim_plot_wGMRF_rel
+```
+
+#### relative trend with and without GMRF
+
+```{r}
+max_simu = 5
+
+sim_plot_compGMRF_rel <- do.call('rbind',sim_dsem_2TS_none3[1:max_simu]) %>% 
+  as.data.frame() %>% 
+  mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),
+         variance='none',type='simu',GMRF='false') %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_random3[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),
+           variance='random',type='simu',GMRF='false')) %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_both3[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),
+           variance='both',type='simu',GMRF='false')) %>% 
+  
+  #simulation with GMRF = T
+  bind_rows(do.call('rbind',sim_dsem_2TS_none2[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),
+           variance='none',type='simu',GMRF='true')) %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_both2[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),
+           variance='both',type='simu',GMRF='true')) %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_random2[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),
+           variance='random',type='simu',GMRF='true')) %>% 
+  
+  # real data
+  bind_rows(data.frame(obs1=obs1, obs2=obs2,Year=1:N,sim=0,variance='none',type='true',GMRF='false')) %>%
+  
+  pivot_longer(cols=c(obs1,obs2)) %>% #which(is.na(year))#summary()
+  mutate(relvalue=value[which(type=='true')]-value,
+         variance=factor(variance,levels=c('none','random','both'))) %>% 
+  filter(type=='simu',name=='obs1') %>% 
+  
+  ggplot()+
+  geom_line(aes(x=Year,relvalue,group=sim))+
+  # geom_boxplot(aes(x=Year,value,group=Year, col=type))+
+  facet_grid(GMRF~variance)+
+  scale_alpha_manual(values=c(0.5,1))+
+  # scale_color_manual(values=c('grey','black'))#+
+  # scale_linewidth_manual(values=c(1,2))
+  theme(legend.position = 'none')
+
+sim_plot_compGMRF_rel
+```
+
+### Refit 
+
+#### GMRF=F
+
+```{r}
+
+max_simu = 500#nsims
+refit_dsem_2TS_noNA_none <- refit_dsem_2TS_noNA_random <-refit_dsem_2TS_noNA_both <- list() 
+
+# easy way: a loop
+for(i in 1:max_simu){
+  # for variamce = none
+  refit_dsem_2TS_noNA_none[[i]] = dsem( sem=sem, tsdata=sim_dsem_2TS_none3[[i]], family=family, control=new_control)
+  refit_dsem_2TS_noNA_none[[i]]$version <- i
+  
+  # for variamce = random
+  refit_dsem_2TS_noNA_random[[i]] = dsem( sem=sem, tsdata=sim_dsem_2TS_random3[[i]], family=family, control=new_control)
+  refit_dsem_2TS_noNA_random[[i]]$version <- i
+  
+  # for variamce = both
+  refit_dsem_2TS_noNA_both[[i]] = dsem( sem=sem, tsdata=sim_dsem_2TS_both3[[i]], family=family, control=new_control)
+  refit_dsem_2TS_noNA_both[[i]]$version <- i
+}
+# tpm_none  <- refit_dsem_2TS_noNA_none
+# tpm_random  <- refit_dsem_2TS_noNA_random
+# tpm_both  <- refit_dsem_2TS_noNA_both
+
+# functionnal prog => possible but have to think how to keep track of the simulation length
+
+# purrr::map(sim_dsem_2TS_none3[1:5],function(x){})
+
+```
+
+#### GMRF=T
+
+```{r}
+
+max_simu = 200#nsims
+refit_dsem_2TSGMRF_noNA_none <- refit_dsem_2TSGMRF_noNA_random <-refit_dsem_2TSGMRF_noNA_both <- list() 
+
+# easy way: a loop
+for(i in 1:max_simu){
+  # for variamce = none
+  refit_dsem_2TSGMRF_noNA_none[[i]] = dsem( sem=sem, tsdata=sim_dsem_2TS_none2[[i]], family=family, control=new_control)
+  refit_dsem_2TSGMRF_noNA_none[[i]]$version <- i
+  
+  # for variamce = random
+  refit_dsem_2TSGMRF_noNA_random[[i]] = dsem( sem=sem, tsdata=sim_dsem_2TS_random2[[i]], family=family, control=new_control)
+  refit_dsem_2TSGMRF_noNA_random[[i]]$version <- i
+  
+  # for variamce = both
+  refit_dsem_2TSGMRF_noNA_both[[i]] = dsem( sem=sem, tsdata=sim_dsem_2TS_both2[[i]], family=family, control=new_control)
+  refit_dsem_2TSGMRF_noNA_both[[i]]$version <- i
+}
+
+```
+
+### check fit convergence
+
+```{r}
+
+
+# refit_dsem_2TS_noNA_none_conv <- purrr::map_vec(refit_dsem_2TS_noNA_none,function(x){x$opt$message})
+# refit_dsem_2TS_noNA_none_conv <- purrr::map_dfr(refit_dsem_2TS_noNA_none,function(x){
+#   data.frame(sim=x$version,conv=x$opt$message)})
+# refit_dsem_2TS_noNA_none_conv %>% group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_2TS_noNA_none,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_2TS_noNA_random,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_2TS_noNA_both,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+
+purrr::map_dfr(refit_dsem_2TSGMRF_noNA_none,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_2TSGMRF_noNA_random,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_2TSGMRF_noNA_both,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+all_refit <- list(refit_dsem_2TS_noNA_none,refit_dsem_2TSGMRF_noNA_none,
+                  refit_dsem_2TS_noNA_random,refit_dsem_2TSGMRF_noNA_random,
+                  refit_dsem_2TS_noNA_both,refit_dsem_2TSGMRF_noNA_both)
+
+# purrr::map_dfr(all_refit,function(x){data.frame(sim=x$version,conv=x$opt$message)})#%>%
+#  # group_by(conv) %>% summarize(n=length(sim))
+
+
+```
+
+
+### plot parameter estimation
+
+#### for 1 set of simulation 
+
+```{r}
+purrr::map_dfr(refit_dsem_2TS_noNA_none,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+  ggplot()+geom_boxplot(aes(path,Estimate))+
+  geom_point(data=summary(fit_dsem_2TS_noNA),aes(x=path,y=Estimate),col='red')+
+  labs(title=paste('nsim = ',length(refit_dsem_2TS_noNA_none)))
+
+```
+
+#### multiple comparison => actual value
+
+```{r}
+
+purrr::map_dfr(refit_dsem_2TS_noNA_none,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+  mutate(variance = 'none') %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_2TS_noNA_random,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'random') ) %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_2TS_noNA_both,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'both') ) %>% 
+  
+  #plot
+  ggplot()+geom_boxplot(aes(path,Estimate,col=variance))+
+  geom_point(data=summary(fit_dsem_2TS_noNA),aes(x=path,y=Estimate),col='red')+
+  
+  labs(title=paste('nsim = ',length(refit_dsem_2TS_noNA_none)))
+
+
+```
+
+#### multiple comparison => relative error value
+
+```{r}
+
+purrr::map_dfr(refit_dsem_2TS_noNA_none,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+  mutate(variance = 'none') %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_2TS_noNA_random,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'random') ) %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_2TS_noNA_both,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'both') ) %>% 
+  
+  # add inital fit estimates
+  bind_rows(summary(fit_dsem_2TS_noNA) %>% mutate(sim=0,variance='')) %>% 
+  
+  # add parameter meaning 
+  mutate(param=ifelse(first!=second,'causal_link',
+                        ifelse(direction==1,'AR1correlation','variance'))) %>% 
+
+  #compute relative error
+  group_by(path) %>% 
+  mutate(RE0 = (Estimate[which(sim==0)]-Estimate)/Estimate,
+         RE = (Estimate-Estimate[which(sim==0)])/Estimate[which(sim==0)]) %>% 
+  filter(variance !='') %>% 
+  
+  #plot
+  ggplot()+geom_boxplot(aes(first,RE,fill=variance))+
+  geom_hline(yintercept=0) + 
+  labs(title=paste('GMRF=F, nsim = ',length(refit_dsem_2TS_noNA_none))) + facet_wrap(~param,scale='free_y')
+
+##### GMRF =T
+
+purrr::map_dfr(refit_dsem_2TSGMRF_noNA_none,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+  mutate(variance = 'none') %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_2TSGMRF_noNA_random,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'random') ) %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_2TSGMRF_noNA_both,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'both') ) %>% 
+  
+  # add inital fit estimates
+  bind_rows(summary(fit_dsem_2TS_noNA) %>% mutate(sim=0,variance='')) %>% 
+  
+  # add parameter meaning 
+  mutate(param=ifelse(first!=second,'causal_link',
+                        ifelse(direction==1,'AR1correlation','variance'))) %>% 
+
+  #compute relative error
+  group_by(path) %>% 
+  mutate(RE0 = (Estimate[which(sim==0)]-Estimate)/Estimate,
+         RE = (Estimate-Estimate[which(sim==0)])/Estimate[which(sim==0)]) %>% 
+  filter(variance !='') %>% 
+  
+  #plot
+  ggplot()+geom_boxplot(aes(first,RE,fill=variance))+
+  geom_hline(yintercept=0) + 
+  labs(title=paste('GMRF=T, nsim = ',length(refit_dsem_2TSGMRF_noNA_none))) + facet_wrap(~param,scale='free_y')
+
+
+```
+
+#### multiple comparison comp GMRF => relative error value
+
+```{r}
+
+summary(fit_dsem_2TS_noNA) %>% mutate(sim=0,variance='',GMRF='false') %>%
+  
+  #add refitted estimates from GMRF=F
+  bind_rows(purrr::map_dfr(refit_dsem_2TS_noNA_none,
+                           function(x){summary(x) %>% mutate(sim=x$version)}) %>%
+              mutate(variance = 'variance_none',GMRF='GMRF_false')) %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_2TS_noNA_random,
+                           function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+              mutate(variance = 'variance_random',GMRF='GMRF_false') ) %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_2TS_noNA_both,
+                           function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+              mutate(variance = 'variance_both',GMRF='GMRF_false') ) %>% 
+
+  #add refitted estimates from GMRF=T
+  bind_rows(purrr::map_dfr(refit_dsem_2TSGMRF_noNA_none,
+                           function(x){summary(x) %>% mutate(sim=x$version)}) %>%
+              mutate(variance = 'variance_none',GMRF='GMRF_true')) %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_2TSGMRF_noNA_random,
+                           function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+              mutate(variance = 'variance_random',GMRF='GMRF_true') ) %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_2TSGMRF_noNA_both,
+                           function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+              mutate(variance = 'variance_both',GMRF='GMRF_true') ) %>% 
+ 
+  # add parameter meaning 
+  mutate(param=ifelse(first!=second,'causal_link',
+                        ifelse(direction==1,'AR1correlation','variance'))) %>% 
+
+  #compute relative error
+  group_by(path) %>% 
+  mutate(RE0 = (Estimate[which(sim==0)]-Estimate)/Estimate,
+         RE = (Estimate-Estimate[which(sim==0)])/Estimate[which(sim==0)]) %>% 
+  filter(variance !='') %>% 
+  
+  #plot
+  ggplot()+geom_boxplot(aes(first,RE,fill=variance))+
+  geom_hline(yintercept=0) + 
+  labs(title=paste('nsim = ',length(refit_dsem_2TS_noNA_none))) +
+  facet_grid(GMRF~param,scale='free_y')
+
+```
+
+
+## 7.2 With  a very simple model with NA
+
+### Fit
+
+```{r}
+
+set.seed(15)
+sd <- .1
+N <- 100
+sim1 <- arima.sim(list(order = c(1,0,0), ar = 0.1), n = N)
+obs1_NA <- sim1 + rnorm(N,0,sd)
+sim2 <- arima.sim(list(order = c(1,0,0), ar = 0.95), n = N)
+obs2_NA <- sim2 + rnorm(N,0,sd)
+obs1_NA[c(1:10,60:70)] <- NA
+obs2_NA[c(1:10,70:70)] <- NA
+Z <- ts(data.frame(obs1=obs1_NA, obs2=obs2_NA))
+sem <- "
+  obs1 -> obs1, 1, AR1, .01
+  obs2 -> obs2, 1, AR2, .01
+"
+
+family <- rep('normal', ncol(Z))
+
+# first non fit
+control <- dsem_control(use_REML=TRUE, run_model=FALSE,quiet=TRUE, getJointPrecision = TRUE)
+fit_dsem_2TS_null = dsem(sem=sem, tsdata=Z, family=family, control=control )
+
+# new map and pars ## turn off estimation of obs error at specified value
+new_map = fit_dsem_2TS_null$tmb_inputs$map
+new_map$lnsigma_j <- factor(rep(NA, length=length(new_map$lnsigma_j)))
+new_pars <- fit_dsem_2TS_null$tmb_inputs$parameters
+new_pars$lnsigma_j <- rep(log(sd), length=length(new_pars$lnsigma_j))
+
+new_control=dsem_control(use_REML=TRUE, run_model=TRUE,quiet=TRUE, 
+                         getJointPrecision = TRUE,parameters=new_pars, map=new_map,)
+fit_dsem_2TS_NA = dsem( sem=sem, tsdata=Z, family=family, control=new_control)
+
+# Q <- fit$sdrep$jointPrecision
+
+```
+
+
+### Simulation
+
+
+#### GMRF=F
+
+```{r}
+# /!\ 1000 c'est long
+nsims = 1000
+fit_dsem_2TS=fit_dsem_2TS_NA#fit
+
+sim_dsem_2TS_NA_none3 <- simulate(object = fit_dsem_2TS,nsim=nsims,seed=12,variance = 'none', resimulate_gmrf = FALSE)
+
+sim_dsem_2TS_NA_random3 <- simulate(object = fit_dsem_2TS,nsim=nsims,seed=12,variance = 'random', resimulate_gmrf = FALSE)
+
+sim_dsem_2TS_NA_both3 <- simulate(object = fit_dsem_2TS,nsim=nsims,seed=12,variance = 'both', resimulate_gmrf = F)
+
+
+```
+
+#### GMRF=T
+
+```{r}
+# /!\ 1000 c'est long
+nsims = 500
+fit_dsem_2TS=fit_dsem_2TS_noNA#fit
+
+sim_dsem_2TS_NA_none2 <- simulate(object = fit_dsem_2TS,nsim=nsims,seed=12,variance = 'none', resimulate_gmrf = TRUE)
+
+sim_dsem_2TS_NA_random2 <- simulate(object = fit_dsem_2TS,nsim=nsims,seed=12,variance = 'random', resimulate_gmrf = TRUE)
+
+sim_dsem_2TS_NA_both2 <- simulate(object = fit_dsem_2TS,nsim=nsims,seed=12,variance = 'both', resimulate_gmrf = TRUE)
+
+
+
+```
+
+### Compare trends
+
+####  with resimulated_GRMF=F
+
+```{r}
+
+max_simu = 1000
+
+sim_plot_woGMRF <- do.call('rbind',sim_dsem_2TS_NA_none3[1:max_simu]) %>% 
+  as.data.frame() %>% 
+  mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='none',type='simu') %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_NA_random3[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='random',type='simu')) %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_NA_both3[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='both',type='simu')) %>% 
+  
+  # bind_rows(data.frame(obs1=obs1, obs2=obs2,Year=1:N,sim=0,variance='none',type='true')) %>% 
+  # bind_rows(data.frame(obs1=obs1, obs2=obs2,Year=1:N,sim=0,variance='random',type='true')) %>%  
+  # bind_rows(data.frame(obs1=obs1, obs2=obs2,Year=1:N,sim=0,variance='both',type='true')) %>% 
+  
+  pivot_longer(cols=c(obs1,obs2)) %>% #which(is.na(year))#summary()
+  mutate(variance=factor(variance,levels=c('none','random','both'))) %>% 
+  
+  ggplot()+
+  geom_line(aes(x=Year,value,col=type,group=sim,alpha=type))+#,linewidth=type,
+  # geom_boxplot(aes(x=Year,value,group=Year, col=type))+
+  facet_grid(name~variance)+
+  scale_alpha_manual(values=c(0.5,1))+
+  # scale_color_manual(values=c('grey','black'))#+
+  # scale_linewidth_manual(values=c(1,2))
+  geom_line(data=data.frame(obs1=obs1_NA, obs2=obs2_NA,Year=1:N,sim=0,type='true') %>% 
+              pivot_longer(cols=c(obs1,obs2)),aes(x=Year,value),col='black')+
+  theme(legend.position = 'none')
+
+sim_plot_woGMRF
+
+# relative variable value
+
+sim_plot_woGMRF_rel <- do.call('rbind',sim_dsem_2TS_NA_none3[1:max_simu]) %>% 
+  as.data.frame() %>% 
+  mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),
+         variance='none',type='simu') %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_NA_random3[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),
+           variance='random',type='simu')) %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_NA_both3[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),
+           variance='both',type='simu')) %>% 
+  
+  # real data
+  bind_rows(data.frame(obs1=obs1_NA, obs2=obs2_NA,Year=1:N,sim=0,variance='none',type='true')) %>%
+  
+  pivot_longer(cols=c(obs1,obs2)) %>% #which(is.na(year))#summary()
+  mutate(relvalue=value[which(type=='true')]-value,
+         variance=factor(variance,levels=c('none','random','both'))) %>% 
+  filter(type=='simu') %>% 
+  
+  ggplot()+
+  geom_line(aes(x=Year,relvalue,group=sim,col=sim))+
+  # geom_boxplot(aes(x=Year,value,group=Year, col=type))+
+  facet_grid(name~variance)+
+  scale_alpha_manual(values=c(0.5,1))+
+  # scale_color_manual(values=c('grey','black'))#+
+  # scale_linewidth_manual(values=c(1,2))
+  theme(legend.position = 'none')
+
+sim_plot_woGMRF_rel
+
+
+```
+
+
+#### with resimulated_GRMF=T
+
+```{r}
+
+max_simu = 50
+
+sim_plot_wGMRF <- do.call('rbind',sim_dsem_2TS_none2[1:max_simu]) %>% 
+  as.data.frame() %>% 
+  mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='none',type='simu') %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_random2[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='random',type='simu')) %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_both2[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='both',type='simu')) %>% 
+  
+  bind_rows(data.frame(obs1=obs1, obs2=obs2,Year=1:N,sim=0,variance='none',type='true')) %>% 
+  bind_rows(data.frame(obs1=obs1, obs2=obs2,Year=1:N,sim=0,variance='random',type='true')) %>%  
+  bind_rows(data.frame(obs1=obs1, obs2=obs2,Year=1:N,sim=0,variance='both',type='true')) %>% 
+  
+  pivot_longer(cols=c(obs1,obs2)) %>%
+  mutate(variance=factor(variance,levels=c('none','random','both'))) %>% 
+  
+  ggplot()+geom_line(aes(x=Year,value,col=type,group=sim,alpha=type))+
+  facet_grid(name~variance)+
+  scale_alpha_manual(values=c(0.5,1))+
+  theme(legend.position = 'bottom')
+
+sim_plot_wGMRF
+
+
+sim_plot_wGMRF_rel <- do.call('rbind',sim_dsem_2TS_none2[1:max_simu]) %>% 
+  as.data.frame() %>% 
+  mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='none',type='simu') %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_random2[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='random',type='simu')) %>% 
+  
+  bind_rows(do.call('rbind',sim_dsem_2TS_both2[1:max_simu]) %>% 
+    as.data.frame() %>% 
+    mutate(Year=rep(1:N,max_simu),sim=rep(1:max_simu,each=N),variance='both',type='simu')) %>% 
+  
+  bind_rows(data.frame(obs1=obs1, obs2=obs2,Year=1:N,sim=0,variance='none',type='true')) %>% 
+  
+  pivot_longer(cols=c(obs1,obs2)) %>% 
+  mutate(relvalue=value[which(type=='true')]-value,
+         variance=factor(variance,levels=c('none','random','both'))) %>% 
+  filter(type!='true') %>% 
+  
+  ggplot()+geom_line(aes(x=Year,relvalue,col=sim,group=sim))+
+  facet_grid(name~variance)+
+  theme(legend.position = 'none')
+
+sim_plot_wGMRF_rel
+```
+
+### Refit 
+
+#### GMRF=F
+
+```{r}
+
+max_simu = 1000#nsims
+refit_dsem_2TS_NA_none <- refit_dsem_2TS_NA_random <-refit_dsem_2TS_NA_both <- list() 
+# tpm_none  <- refit_dsem_2TS_NA_none
+# tpm_random  <- refit_dsem_2TS_NA_random
+# tpm_both  <- refit_dsem_2TS_NA_both
+
+# easy way: a loop
+for(i in 1:max_simu){
+  # for variamce = none
+  refit_dsem_2TS_NA_none[[i]] = dsem( sem=sem, tsdata=sim_dsem_2TS_NA_none3[[i]], family=family, control=new_control)
+  refit_dsem_2TS_NA_none[[i]]$version <- i
+  
+  # for variamce = random
+  refit_dsem_2TS_NA_random[[i]] = dsem( sem=sem, tsdata=sim_dsem_2TS_NA_random3[[i]], family=family, control=new_control)
+  refit_dsem_2TS_NA_random[[i]]$version <- i
+  
+  # for variamce = both
+  refit_dsem_2TS_NA_both[[i]] = dsem( sem=sem, tsdata=sim_dsem_2TS_NA_both3[[i]], family=family, control=new_control)
+  refit_dsem_2TS_NA_both[[i]]$version <- i
+}
+
+# functionnal prog => possible but have to think how to keep track of the simulation length
+
+# purrr::map(sim_dsem_2TS_none3[1:5],function(x){})
+
+```
+
+#### GMRF=T
+
+```{r}
+
+max_simu = 500#nsims
+refit_dsem_2TSGMRF_NA_none <- refit_dsem_2TSGMRF_NA_random <-refit_dsem_2TSGMRF_NA_both <- list() 
+
+# easy way: a loop
+for(i in 1:max_simu){
+  # for variamce = none
+  refit_dsem_2TSGMRF_NA_none[[i]] = dsem( sem=sem, tsdata=sim_dsem_2TS_NA_none2[[i]], family=family, control=new_control)
+  refit_dsem_2TSGMRF_NA_none[[i]]$version <- i
+  
+  # for variamce = random
+  refit_dsem_2TSGMRF_NA_random[[i]] = dsem( sem=sem, tsdata=sim_dsem_2TS_NA_random2[[i]], family=family, control=new_control)
+  refit_dsem_2TSGMRF_NA_random[[i]]$version <- i
+  
+  # for variamce = both
+  refit_dsem_2TSGMRF_NA_both[[i]] = dsem( sem=sem, tsdata=sim_dsem_2TS_NA_both2[[i]], family=family, control=new_control)
+  refit_dsem_2TSGMRF_NA_both[[i]]$version <- i
+}
+
+```
+
+### check fit convergence
+
+```{r}
+
+
+# refit_dsem_2TS_noNA_none_conv <- purrr::map_vec(refit_dsem_2TS_noNA_none,function(x){x$opt$message})
+# refit_dsem_2TS_noNA_none_conv <- purrr::map_dfr(refit_dsem_2TS_noNA_none,function(x){
+#   data.frame(sim=x$version,conv=x$opt$message)})
+# refit_dsem_2TS_noNA_none_conv %>% group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_2TS_NA_none,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_2TS_NA_random,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_2TS_NA_both,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+
+purrr::map_dfr(refit_dsem_2TSGMRF_NA_none,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_2TSGMRF_NA_random,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_2TSGMRF_NA_both,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+all_refit <- list(refit_dsem_2TS_noNA_none,refit_dsem_2TSGMRF_noNA_none,
+                  refit_dsem_2TS_noNA_random,refit_dsem_2TSGMRF_noNA_random,
+                  refit_dsem_2TS_noNA_both,refit_dsem_2TSGMRF_noNA_both)
+
+# purrr::map_dfr(all_refit,function(x){data.frame(sim=x$version,conv=x$opt$message)})#%>%
+#  # group_by(conv) %>% summarize(n=length(sim))
+
+
+```
+
+
+### plot parameter estimation
+
+#### multiple comparison => relative error value
+
+```{r}
+
+purrr::map_dfr(refit_dsem_2TS_NA_none,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+  mutate(variance = 'none') %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_2TS_NA_random,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'random') ) %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_2TS_NA_both,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'both') ) %>% 
+  
+  # add inital fit estimates
+  bind_rows(summary(fit_dsem_2TS_NA) %>% mutate(sim=0,variance='')) %>% 
+  
+  # add parameter meaning 
+  mutate(param=ifelse(first!=second,'causal_link',
+                        ifelse(direction==1,'AR1correlation','variance'))) %>% 
+
+  #compute relative error
+  group_by(path) %>% 
+  mutate(RE0 = (Estimate[which(sim==0)]-Estimate)/Estimate,
+         RE = (Estimate-Estimate[which(sim==0)])/Estimate[which(sim==0)]) %>% 
+  filter(variance !='') %>% 
+  
+  #plot
+  ggplot()+geom_boxplot(aes(first,RE,fill=variance))+
+  geom_hline(yintercept=0) + 
+  labs(title=paste('GMRF=F, nsim = ',length(refit_dsem_2TS_NA_none))) + facet_wrap(~param,scale='free_y')
+
+##### GMRF =T
+
+purrr::map_dfr(refit_dsem_2TSGMRF_NA_none,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+  mutate(variance = 'none') %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_2TSGMRF_NA_random,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'random') ) %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_2TSGMRF_NA_both,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'both') ) %>% 
+  
+  # add inital fit estimates
+  bind_rows(summary(fit_dsem_2TS_noNA) %>% mutate(sim=0,variance='')) %>% 
+  
+  # add parameter meaning 
+  mutate(param=ifelse(first!=second,'causal_link',
+                        ifelse(direction==1,'AR1correlation','variance'))) %>% 
+
+  #compute relative error
+  group_by(path) %>% 
+  mutate(RE0 = (Estimate[which(sim==0)]-Estimate)/Estimate,
+         RE = (Estimate-Estimate[which(sim==0)])/Estimate[which(sim==0)]) %>% 
+  filter(variance !='') %>% 
+  
+  #plot
+  ggplot()+geom_boxplot(aes(first,RE,fill=variance))+
+  geom_hline(yintercept=0) + 
+  labs(title=paste('GMRF=T, nsim = ',length(refit_dsem_2TSGMRF_NA_none))) + facet_wrap(~param,scale='free_y')
+
+
+```
+
+
+## 7.3 With  a very simple model with NA + simulate_NAs
+
+Cole introduce a new argument in simulate.dsem
+
+### Fit 
+
+```{r}
+
+set.seed(156)
+sd <- .2
+N <- 100
+sim1 <- arima.sim(list(order = c(1,0,0), ar = .1), n = N)
+obs1 <- sim1 + rnorm(N,0,sd)
+sim2 <- arima.sim(list(order = c(1,0,0), ar = 0.98), n = N)
+obs2 <- sim2 + rnorm(N,0,sd)
+obs2[90:100] <- obs1[90:100] <- NA
+obs2[1:10] <- obs1[1:10] <- NA
+obs2[40:50] <- obs1[40:50] <- NA
+Z <- ts(data.frame(obs1=obs1, obs2=obs2))
+sem <- "
+  obs1 -> obs1, 1, AR1, .01
+  obs2 -> obs2, 1, AR2, .01
+"
+# Fit using package
+family <- rep('normal', ncol(Z))
+control <- dsem_control(run_model=FALSE)
+fit = dsem( sem=sem, tsdata=Z, family=family, control=control)
+## turn off estimatino of obs error at specified value
+map <- fit$tmb_inputs$map
+map$lnsigma_j <- factor(rep(NA, length=length(map$lnsigma_j)))
+pars <- fit$tmb_inputs$parameters
+pars$lnsigma_j <- rep(log(sd), length=length(pars$lnsigma_j))
+control=dsem_control(parameters=pars, map=map,
+                     getJointPrecision=TRUE)
+fit = dsem( sem=sem, tsdata=Z, family=family, control=control)
+
+
+# Q <- fit$sdrep$jointPrecision
+```
+
+### Simulate
+
+```{r}
+
+x <- expand.grid(ignoreNAs=c(TRUE,FALSE),
+            variance=c('none', 'random','both'),
+            resimulate_gmrf=c(TRUE,FALSE), sim=c(1:10),stringsAsFactors=FALSE)
+# sims_old <- sims
+sims <- NULL#list()
+for(i in 1:nrow(x)){
+  sim <- simulate(fit,seed=NULL, variance=x$variance[i],
+                  ignoreNAs=x$ignoreNAs[i],
+                  resimulate_gmrf=x$resimulate_gmrf[i],
+                  full=TRUE)[[1]]
+  sims <- rbind(sims, data.frame(t=1:N, variance=x$variance[i],
+                      resimulate_gmrf=x$resimulate_gmrf[i],
+                      ignoreNAs=x$ignoreNAs[i],
+                      mu2=as.numeric(sim$mu_tj[,2]),
+                      obs2=as.numeric(sim$y_tj[,2]),simu=x$sim[i]))
+}
+
+```
+
+### Simu plot all
+
+```{r}
+# ggplot(sims, aes(t, obs2, color=ignoreNAs)) +
+#   geom_point(pch=1) +
+#   facet_grid(variance~resimulate_gmrf) +
+#   geom_line(aes(y=mu2))
+
+# sims %>% 
+#   filter(ignoreNAs==T) %>% 
+#   ggplot() +
+#   # geom_point(pch=1) +
+#   geom_line( aes(t, obs2, col=as.factor(simu)))+
+#   facet_grid(variance~resimulate_gmrf) +
+#   geom_line(aes(x=t,y=mu2,group=simu),col='black')#,size=1.1)
+
+sims %>% 
+  filter(ignoreNAs==T) %>% 
+  pivot_longer(cols=c(mu2,obs2)) %>% 
+  ggplot() +
+  # geom_point(pch=1) +
+  geom_line( aes(t, value, col=as.factor(simu),lty=name))+
+  facet_grid(variance~resimulate_gmrf) 
+
+
+sims %>% 
+  filter(ignoreNAs==F) %>% 
+  pivot_longer(cols=c(mu2,obs2)) %>% 
+  ggplot() +
+  # geom_point(pch=1) +
+  geom_line( aes(t, value, col=as.factor(simu),lty=name))+
+  facet_grid(variance~resimulate_gmrf) 
+
+
+
+
+```
+
+### Simu plot GMRF=F
+
+```{r}
+sims %>% 
+  filter(ignoreNAs==T,resimulate_gmrf==F) %>% 
+  # filter(variance !='none') %>% 
+  pivot_longer(cols=c(mu2,obs2)) %>% 
+  ggplot() +
+  # geom_point(pch=1) +
+  geom_line( aes(t, value, col=as.factor(simu),lty=name))+
+  facet_wrap(~variance,ncol = 1) 
+
+
+sims %>% 
+  filter(ignoreNAs==T,resimulate_gmrf==F,simu<6) %>% 
+  # pivot_longer(cols=c(mu2,obs2)) %>% 
+  ggplot() +
+  # geom_point(pch=1) +
+  geom_line( aes(t, mu2, col=as.factor(simu)))+
+  facet_wrap(~variance,ncol = 1) 
+
+```
+
+### 1 clean chunck of code for example
+
+```{r}
+
+set.seed(156)
+sd <- .2
+N <- 100
+sim1 <- arima.sim(list(order = c(1,0,0), ar = .1), n = N)
+obs1 <- sim1 + rnorm(N,0,sd)
+obs1[1:10]  <- obs1[90:100] <- NA
+
+Z <- ts(data.frame(obs1=obs1))
+sem <- "
+  obs1 -> obs1, 1, AR1, .01
+"
+# Fit using package
+family <- rep('normal', ncol(Z))
+control <- dsem_control(run_model=FALSE)
+fit = dsem( sem=sem, tsdata=Z, family=family, control=control)
+## turn off estimation of observarion error and set it at specified value
+map <- fit$tmb_inputs$map
+map$lnsigma_j <- factor(rep(NA, length=length(map$lnsigma_j)))
+pars <- fit$tmb_inputs$parameters
+pars$lnsigma_j <- rep(log(sd), length=length(pars$lnsigma_j))
+control=dsem_control(parameters=pars, map=map,
+                     getJointPrecision=TRUE)
+fit = dsem( sem=sem, tsdata=Z, family=family, control=control)
+
+x <- expand.grid(ignoreNAs=c(TRUE,FALSE),
+            variance=c('none', 'random','both'),
+            resimulate_gmrf=c(TRUE,FALSE), simu=c(1:5),stringsAsFactors=FALSE)
+
+
+sims <- NULL
+for(i in 1:nrow(x)){
+  sim <- simulate(fit,seed=NULL, variance=x$variance[i],
+                  ignoreNAs=x$ignoreNAs[i],
+                  resimulate_gmrf=x$resimulate_gmrf[i],
+                  full=TRUE)[[1]]
+  sims <- rbind(sims, data.frame(t=1:N, variance=x$variance[i],
+                      resimulate_gmrf=x$resimulate_gmrf[i],
+                      ignoreNAs=x$ignoreNAs[i],
+                      mu=as.numeric(sim$mu_tj[,1]),
+                      obs=as.numeric(sim$y_tj[,1]),
+                     true_data=as.numeric(fit$tmb_inputs$data$y_tj[,1]),#obs1,
+                      simu=x$simu[i]))
+}
+
+sims %>%
+  filter(resimulate_gmrf==F,simu<6) %>%
+  ggplot() +
+  # geom_point(pch=1) +
+  geom_line( aes(t, obs, col=as.factor(simu)))+
+  geom_point(aes(t,true_data),col='black',shape=1)+
+  facet_grid(variance~ignoreNAs) +
+  theme(legend.position = 'none')
+
+sims %>%
+  filter(ignoreNAs==T,simu<6) %>%
+  ggplot() +
+  # geom_point(pch=1) +
+  geom_line( aes(t, obs, col=as.factor(simu)))+
+  geom_point(aes(t,true_data),col='black',shape=1)+
+  facet_grid(variance~resimulate_gmrf) +
+  theme(legend.position = 'none')
+
+
+```
+
+
+## 7.4 ExtDSEM simulation DAG1 
+
+### Fit with the TS errors
+
+
+```{r}
+ESPdata_DAG1_rec <- ESPdata_DAG1 %>% 
+  mutate(recdevs=c(fit_assess_usual$sd %>% filter(name=='dev_log_recruit') %>% pull(est),rep(NA,ny_proj))) %>% 
+  relocate(recdevs)
+
+# first non fit
+family <- rep('normal',ncol(ESPdata_DAG1_rec))
+control <- dsem_control(use_REML=F, run_model=F,quiet=TRUE, getJointPrecision = TRUE,newton_loops=0)
+# control_dsem <- dsem_control(use_REML=FALSE, run_model=ifelse(fit_type == 'ExtDsem',TRUE,FALSE),
+#                                  getsd=TRUE, trace=100, newton_loops=1)
+fit_dsem_DAG1_null = dsem(sem=sem_DAG1, tsdata=ts(ESPdata_DAG1_rec), family=family, control=control )
+
+# new map and pars ## turn off estimation of obs error at specified value
+new_map_DAG1 = fit_dsem_DAG1_null$tmb_inputs$map
+new_map_DAG1$lnsigma_j <- factor(rep(NA, length=length(new_map_DAG1$lnsigma_j)))
+new_pars_DAG1 <- fit_dsem_DAG1_null$tmb_inputs$parameters
+new_pars_DAG1$lnsigma_j <- rep(log(0.1), length=length(new_pars_DAG1$lnsigma_j))
+
+new_control=dsem_control(use_REML=F, run_model=TRUE,quiet=TRUE, 
+                         getJointPrecision = TRUE,parameters=new_pars_DAG1, map=new_map_DAG1)
+
+# fit_dsem_DAG1_sd0 = dsem( sem=sem_DAG1, tsdata=ts(ESPdata_DAG1_rec), family=family, control=new_control)
+fit_dsem_DAG1_sd0.1 = dsem( sem=sem_DAG1, tsdata=ts(ESPdata_DAG1_rec), family=family, control=new_control)
+fit_dsem_DAG1_sd0.1$version <- 'DAG1_sd0.1'
+# fit_dsem_DAG1$obj$he()
+# fit_dsem_DAG1$obj$env$altHess
+
+# cbind(fit_dsem_DAG1$opt$par,fit_ext_dsem_DAG1$opt$par)
+
+# fit_ext_dsem_DAG1$version <- 'DAG1_fixed'
+# fit_dsem_DAG1_sd0.1$version <- 'DAG1_normal0.1'
+# fit_dsem_DAG1_sd0$version <- 'DAG1_normal0.00001'
+# 
+# causal_plot(fits=list(fit_dsem_DAG1_sd0.1,fit_ext_dsem_DAG1))
+# causal_plot(fits=list(fit_ext_dsem_DAG1,fit_dsem_DAG1_sd0,fit_dsem_DAG1_sd0.1),
+#             fit_label = c('fixed','normal_sd0','normal_sd0.1'))
+# 
+# dsem_par_plot(fits=list(fit_dsem_DAG1_sd0.1,fit_ext_dsem_DAG1))
+# dsem_par_plot(fits=list(fit_dsem_DAG1_sd0.1,fit_dsem_DAG1_sd0,fit_ext_dsem_DAG1))
+# 
+# summary(fit_dsem_DAG1_sd0.1)
+causal_plot(fits=list(fit_dsem_DAG1_sd0.1))
+```
+
+
+### checking Q
+
+```{r}
+
+Q <- fit_dsem_DAG1_sd0.1$sdrep$jointPrecision
+Qinv <- cov2cor(solve(Q))
+
+corrplot::corrplot(Qinv)
+
+
+##only some part of Q
+fit_dsem_DAG1_sd0.1$obj$par %>% length()
+dim(Qinv)  
+idx <-c(rep('FE',26),rep('rec',69),rep('SST',69),rep('cope',69),rep('euph',69),rep('larvae',69),rep('offYOY',69),rep('NearYOY',69))
+idx_to_rm <- which(idx %in% c('SST','offYOY'))
+
+corrplot::corrplot(Qinv[-idx_to_rm,-idx_to_rm])
+```
+
+### Simulate
+
+
+```{r}
+# /!\ 1000 c'est long
+nsims = 500#1000
+
+# GMRF = F
+# sim_dsem_DAG1_sd0.1_none <- simulate(object = fit_dsem_DAG1_sd0.1,nsim=nsims,seed=120,
+#                                      variance = 'none',
+#                                resimulate_gmrf = FALSE,ignoreNAs = TRUE,full = TRUE)
+# 
+# sim_dsem_DAG1_sd0.1_random <- simulate(object = fit_dsem_DAG1_sd0.1,nsim=nsims,seed=120,
+#                                        variance = 'random',
+#                                        resimulate_gmrf = FALSE,ignoreNAs = TRUE,full = TRUE)
+# 
+# sim_dsem_DAG1_sd0.1_both <- simulate(object = fit_dsem_DAG1_sd0.1,nsim=nsims,seed=120,variance = 'both',
+#                                      resimulate_gmrf = F,ignoreNAs = TRUE,full = TRUE)
+## GMRF = T
+# sim_dsem_DAG1_sd0.1_GMRF_none <- simulate(object = fit_dsem_DAG1_sd0.1,nsim=nsims,seed=120,
+#                                      variance = 'none',
+#                                resimulate_gmrf = TRUE,ignoreNAs = TRUE,full = TRUE)
+# 
+# sim_dsem_DAG1_sd0.1_GMRF_random <- simulate(object = fit_dsem_DAG1_sd0.1,nsim=nsims,seed=120,
+#                                        variance = 'random',
+#                                        resimulate_gmrf = TRUE,ignoreNAs = TRUE,full = TRUE)
+# 
+# sim_dsem_DAG1_sd0.1_GMRF_both <- simulate(object = fit_dsem_DAG1_sd0.1,nsim=nsims,variance = 'both',
+#                                      resimulate_gmrf = TRUE,ignoreNAs = TRUE,full = TRUE)
+
+sim_dsem_DAG1_sd0.1_NAs_none <- simulate(object = fit_dsem_DAG1_sd0.1,nsim=nsims,seed=120,
+                                     variance = 'none',
+                               resimulate_gmrf = FALSE,ignoreNAs = FALSE,full = TRUE)
+
+sim_dsem_DAG1_sd0.1_NAs_random <- simulate(object = fit_dsem_DAG1_sd0.1,nsim=nsims,seed=120,
+                                       variance = 'random',
+                                       resimulate_gmrf = FALSE,ignoreNAs = FALSE,full = TRUE)
+
+sim_dsem_DAG1_sd0.1_NAs_both <- simulate(object = fit_dsem_DAG1_sd0.1,nsim=nsims,seed=120,variance = 'both',
+                                     resimulate_gmrf = F,ignoreNAs = FALSE,full = TRUE)
+
+```
+
+### Plot simulate trends
+
+```{r}
+
+
+max_simu = 5
+
+ sim_plot_woGMRF_DAG1 <-
+   purrr::map_dfr(sim_dsem_DAG1_sd0.1_random[1:max_simu],function(x){
+    x$y_tj %>% 
+    as.data.frame() %>% 
+    mutate(Year=c(1970:(2023+ny_proj)),variance='both',type='simu')}) %>% 
+  
+  mutate(sim=rep(1:max_simu,each = 69)) %>% 
+  
+  pivot_longer(cols=-c(Year,variance,type,sim)) %>%
+   
+  bind_rows(ESPdata_DAG1_rec %>% mutate(Year=c(1970:(2023+ny_proj)),
+                                        variance='',type='data') %>% 
+              pivot_longer(cols=-c(Year,variance,type))) %>%  
+  # mutate(variance=factor(variance,levels=c('none','random','both'))) %>% 
+  
+  ggplot()+
+  geom_line(aes(x=Year,value,group=sim,col=type))+#,linewidth=type,
+  # geom_boxplot(aes(x=Year,value,group=Year, col=type))+
+   facet_wrap(~name)+
+  # scale_alpha_manual(values=c(0.5,1))+
+  # scale_color_manual(values=c('grey','black'))#+
+  # scale_linewidth_manual(values=c(1,2))
+
+  theme(legend.position = 'none')
+
+sim_plot_woGMRF_DAG1
+
+
+kiki <-  ESPdata_DAG1_rec %>% mutate(Year=c(1970:(2023+ny_proj)),
+                                        variance='',type='data') %>% 
+              pivot_longer(cols=-c(Year,variance,type))  
+
+ sim_plot_woGMRF_DAG1_2 <-
+   purrr::map_dfr(sim_dsem_DAG1_sd0.1_both[1:max_simu],function(x){
+    x$y_tj %>% 
+    as.data.frame() %>% 
+    mutate(Year=c(1970:(2023+ny_proj)),variance='both',type='simu')}) %>% 
+  
+  mutate(sim=rep(1:max_simu,each = 69)) %>% 
+  
+  pivot_longer(cols=-c(Year,variance,type,sim)) %>%
+   
+  # mutate(variance=factor(variance,levels=c('none','random','both'))) %>% 
+  
+  ggplot()+
+  geom_line(aes(x=Year,value,group=sim,col=as.factor(sim)))+#,linewidth=type,
+  geom_point(data=kiki,aes(x=Year,value), col='black',shape=1)+
+   facet_wrap(~name)+
+  # scale_alpha_manual(values=c(0.5,1))+
+  # scale_color_manual(values=c('grey','black'))#+
+  # scale_linewidth_manual(values=c(1,2))
+
+  theme(legend.position = 'none')
+
+sim_plot_woGMRF_DAG1_2
+
+```
+
+plot with 4 ts and the 3 choice of variances
+
+```{r}
+
+max_simu = 5
+
+
+kiki2 <-  ESPdata_DAG1_rec %>% mutate(Year=c(1970:(2023+ny_proj)),
+                                        variance='both',type='data') %>% 
+  bind_rows(ESPdata_DAG1_rec %>% mutate(Year=c(1970:(2023+ny_proj)),
+                                        variance='random',type='data') ) %>% 
+  bind_rows(ESPdata_DAG1_rec %>% mutate(Year=c(1970:(2023+ny_proj)),
+                                        variance='none',type='data') ) %>% 
+              pivot_longer(cols=-c(Year,variance,type)) %>% 
+   filter(!name%in%c('Spr_SST','Sum_OffYOY_Shelikof')) %>% #'Sum_LCopepod_Shelikof',
+   mutate(variance=factor(variance,levels=c('none','random','both'))) 
+
+ sim_plot_DAG1 <-
+  #variance = both
+   purrr::map_dfr(sim_dsem_DAG1_sd0.1_both[1:max_simu],function(x){
+    x$y_tj %>% 
+    as.data.frame() %>% 
+    mutate(Year=duration_wproj,variance='both',type='simu')}) %>% 
+    mutate(sim=rep(1:max_simu,each = length(duration_wproj))) %>% 
+  
+  #variance = random
+  bind_rows( purrr::map_dfr(sim_dsem_DAG1_sd0.1_random[1:max_simu],function(x){
+    x$y_tj %>% 
+    as.data.frame() %>% 
+    mutate(Year=duration_wproj,variance='random',type='simu')}) %>% 
+    mutate(sim=rep(1:max_simu,each = length(duration_wproj))) ) %>% 
+
+  #variance = none
+  bind_rows( purrr::map_dfr(sim_dsem_DAG1_sd0.1_none[1:max_simu],function(x){
+    x$y_tj %>% 
+    as.data.frame() %>% 
+    mutate(Year=duration_wproj,variance='none',type='simu')}) %>% 
+    mutate(sim=rep(1:max_simu,each = length(duration_wproj))) )%>%   
+  
+  pivot_longer(cols=-c(Year,variance,type,sim)) %>%
+   
+  # bind_rows(ESPdata_DAG1_rec %>% mutate(Year=c(1970:(2023+ny_proj)),
+  #                                       variance='',type='data') %>% 
+  #             pivot_longer(cols=-c(Year,variance,type))) %>%  
+  # mutate(variance=factor(variance,levels=c('none','random','both'))) %>%
+  
+  filter(!name%in%c('Spr_SST','Sum_OffYOY_Shelikof')) %>% #,'Sum_LCopepod_Shelikof'
+  mutate(variance=factor(variance,levels=c('none','random','both'))) %>% 
+    
+  ggplot()+
+  geom_line(aes(x=Year,value,group=sim,col=as.factor(sim)))+#,linewidth=type,
+  geom_point(data=kiki2,aes(x=Year,value), col='black',shape=1)+
+   facet_grid(name~variance)+
+  # scale_alpha_manual(values=c(0.5,1))+
+  # scale_color_manual(values=c('grey','black'))#+
+  # scale_linewidth_manual(values=c(1,2))
+
+  theme(legend.position = 'none')
+  sim_plot_DAG1
+```
+
+
+
+### Refit
+
+
+```{r}
+
+max_simu = 500#nsims
+# refit_dsem_DAG1_none <- refit_dsem_DAG1_random <- list() #refit_dsem_DAG1_both <-
+# refit_dsem_DAG1_GMRF_none <- refit_dsem_DAG1_GMRF_random <- list()
+# refit_dsem_DAG1_both_archive <- refit_dsem_DAG1_both
+refit_dsem_DAG1_NAs_none <- refit_dsem_DAG1_NAs_random <- refit_dsem_DAG1_NAs_both <- list() #
+
+
+# easy way: a loop
+for(i in 121:max_simu){
+  # for variance = none
+  # refit_dsem_DAG1_none[[i]] = dsem( sem=sem_DAG1, tsdata=sim_dsem_DAG1_sd0.1_none[[i]]$y_tj, family=family, control=new_control)
+  # refit_dsem_DAG1_none[[i]]$version <- i
+  # 
+  # # for variance = random
+  # refit_dsem_DAG1_random[[i]] = dsem( sem=sem_DAG1, tsdata=sim_dsem_DAG1_sd0.1_random[[i]]$y_tj, family=family, control=new_control)
+  # refit_dsem_DAG1_random[[i]]$version <- i
+  
+  # for variance = both
+  # refit_dsem_DAG1_both[[i]] = dsem( sem=sem_DAG1, tsdata=sim_dsem_DAG1_sd0.1_both[[i]]$y_tj, family=family, control=new_control)
+  # refit_dsem_DAG1_both[[i]]$version <- i
+    
+  # for variance = none
+  # refit_dsem_DAG1_GMRF_none[[i]] = dsem( sem=sem_DAG1, tsdata=sim_dsem_DAG1_sd0.1_GMRF_none[[i]]$y_tj, family=family, control=new_control)
+  # refit_dsem_DAG1_GMRF_none[[i]]$version <- i
+   
+  # for variance = random
+  # refit_dsem_DAG1_GMRF_random[[i]] = dsem( sem=sem_DAG1, tsdata=sim_dsem_DAG1_sd0.1_GMRF_random[[i]]$y_tj, family=family, control=new_control)
+  # refit_dsem_DAG1_GMRF_random[[i]]$version <- i
+  
+  # for variance = none
+  refit_dsem_DAG1_NAs_none[[i]] = dsem( sem=sem_DAG1, tsdata=sim_dsem_DAG1_sd0.1_NAs_none[[i]]$y_tj, family=family, control=new_control)
+  refit_dsem_DAG1_NAs_none[[i]]$version <- i
+
+  # for variance = random
+  refit_dsem_DAG1_NAs_random[[i]] = dsem( sem=sem_DAG1, tsdata=sim_dsem_DAG1_sd0.1_NAs_random[[i]]$y_tj, family=family, control=new_control)
+  refit_dsem_DAG1_NAs_random[[i]]$version <- i
+
+  # for variance = both
+  refit_dsem_DAG1_NAs_both[[i]] = dsem( sem=sem_DAG1, tsdata=sim_dsem_DAG1_sd0.1_NAs_both[[i]]$y_tj, family=family, control=new_control)
+  refit_dsem_DAG1_NAs_both[[i]]$version <- i
+
+
+}
+
+
+```
+
+### check fit convergence
+
+```{r}
+
+
+purrr::map_dfr(refit_dsem_DAG1_none,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_DAG1_random,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_DAG1_both,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_DAG1_GMRF_none,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_DAG1_GMRF_random,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+
+purrr::map_dfr(refit_dsem_DAG1_NAs_none,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_DAG1_NAs_random,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_DAG1_NAs_both,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+
+```
+
+
+### Plot parameter estimation
+
+```{r}
+
+refit_dsem_DAG1_all  <- 
+  #no NAs GMRF=F
+  purrr::map_dfr(refit_dsem_DAG1_none,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+  mutate(variance = 'none',GMRF='FALSE',NAs='no') %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_DAG1_random,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'random',GMRF='FALSE',NAs='no') ) %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_DAG1_both,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'both',GMRF='FALSE',NAs='no') ) %>% 
+  
+  #no NAs GMRF=T
+  bind_rows(purrr::map_dfr(refit_dsem_DAG1_GMRF_random,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'random',GMRF='TRUE',NAs='no') ) %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_DAG1_GMRF_none,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'none',GMRF='TRUE',NAs='no') ) %>% 
+  
+  #NAs, GMRF=F
+  bind_rows(purrr::map_dfr(refit_dsem_DAG1_NAs_none,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'none',GMRF='FALSE',NAs='yes') ) %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_DAG1_NAs_random,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'random',GMRF='FALSE',NAs='yes') ) %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_DAG1_NAs_both,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'both',GMRF='FALSE',NAs='yes') ) %>% 
+  
+  # add inital fit estimates
+  bind_rows(summary(fit_dsem_DAG1_sd0.1) %>% mutate(sim=0,variance='',GMRF='',NAs='')) %>% 
+  
+  # add parameter meaning 
+  mutate(param=ifelse(first!=second,'causal_link',
+                        ifelse(direction==1,'AR1correlation','variance'))) %>% 
+
+  # add another thing
+  mutate(par_name=ifelse(param=='causal_link',name,first)) %>% 
+  #compute relative error
+  group_by(path) %>% 
+  mutate(RE0 = (Estimate[which(sim==0)]-Estimate)/Estimate,
+         RE = (Estimate-Estimate[which(sim==0)])/Estimate[which(sim==0)]) %>% 
+  filter(variance !='') 
+  
+  #plot 3 variance type GMRF = TRUE
+refit_dsem_DAG1_all %>% 
+  filter(sim<501,GMRF=="TRUE",NAs=='no') %>% 
+  ggplot()+geom_boxplot(aes(first,RE,fill=variance))+
+  geom_hline(yintercept=0) + 
+  labs(title=paste('GMRF=T, nsim = ',length(refit_dsem_DAG1_none))) + facet_wrap(~param)+
+   theme(axis.text.x = element_text(angle=45),legend.position = 'bottom')
+
+  #plot 3 variance type GMRF = F
+refit_dsem_DAG1_all %>% 
+  filter(sim<501,GMRF=="FALSE",NAs=='no') %>% 
+  ggplot()+geom_boxplot(aes(first,RE,fill=variance))+
+  geom_hline(yintercept=0) + 
+  labs(title=paste('GMRF=F, nsim = ',length(refit_dsem_DAG1_none))) + facet_wrap(~param)+
+   theme(axis.text.x = element_text(angle=45),legend.position = 'bottom')
+
+
+  #NAs GMRF=F
+refit_dsem_DAG1_all %>% 
+  filter(sim<501,GMRF=="FALSE",NAs=='yes') %>% 
+  ggplot()+geom_boxplot(aes(first,RE,fill=variance))+
+  geom_hline(yintercept=0) + 
+  labs(title=paste('GMRF=F, NAs, nsim = ',length(refit_dsem_DAG1_none))) + facet_wrap(~param,scale='free_y')+#
+   theme(axis.text.x = element_text(angle=45),legend.position = 'bottom')
+
+
+# plot only both
+refit_dsem_DAG1_all %>% 
+  filter(variance=='both',NAs=='no',GMRF=='FALSE') %>% 
+  ggplot()+geom_boxplot(aes(first,RE))+
+  geom_hline(yintercept=0) + 
+  labs(title=paste('GMRF=F, nsim = ',length(refit_dsem_DAG1_both))) + facet_wrap(~param,scale='free_y')+
+   theme(axis.text.x = element_text(angle=45))
+
+
+  #plot only both
+refit_dsem_DAG1_all %>% 
+  filter(variance=='both',NAs=='no',GMRF=='FALSE') %>% 
+  ggplot()+geom_boxplot(aes(name,RE))+
+  geom_hline(yintercept=0) + 
+  labs(title=paste('GMRF=F,variance = both, nsim = ',length(refit_dsem_DAG1_both))) + 
+  # facet_wrap(~param,scale='free_y')+
+  theme(axis.text.x = element_text(angle=45))
+
+
+```
+### Save files
+
+```{r}
+# liste = c('sim_dsem_DAG1_nobetas_sd0.1_none','sim_dsem_DAG1_nobetas_sd0.1_random','sim_dsem_DAG1_nobetas_sd0.1_both',
+#           'sim_dsem_DAG1_sd0.1_none','sim_dsem_DAG1_sd0.1_random','sim_dsem_DAG1_sd0.1_both',
+#           'sim_dsem_DAG1_nobetas_sd0.1_none','sim_dsem_DAG1_nobetas_sd0.1_random','sim_dsem_DAG1_nobetas_sd0.1_both'
+#           )
+# 
+# save(list = ,file='sim_and_refit_DAG1.Rdata')
+```
+
+
+
+
+## 7.5 Try simulation on Dsem dag1 without causal links
+
+### DAG1 wo causal link
+
+```{r}
+
+sem_DAG1_nobetas = "
+  # link, lag, param_name, start_value
+
+  #internal data relation
+  Spr_SST -> Spr_SST,1,AR1
+  Spr_Larvae_Shelikof -> Spr_Larvae_Shelikof,1,AR2
+  Sum_LCopepod_Shelikof -> Sum_LCopepod_Shelikof,1,AR3
+  Sum_OffYOY_Shelikof -> Sum_OffYOY_Shelikof,1,AR4
+  Sum_NearYOY_Kodiak -> Sum_NearYOY_Kodiak,1,AR5
+  Sum_Euph_Kodiak -> Sum_Euph_Kodiak,1,AR6
+  recdevs <-> recdevs, 0, sigmaR, 1
+"
+
+```
+
+
+### Fit with the TS errors
+
+```{r}
+# ESPdata_DAG1_rec <- ESPdata_DAG1 %>% 
+#   mutate(recdevs=c(fit_assess_usual$sd %>% filter(name=='dev_log_recruit') %>% pull(est),rep(NA,ny_proj))) %>% 
+#   relocate(recdevs)
+
+# first non fit
+family <- rep('normal',ncol(ESPdata_DAG1_rec))
+control <- dsem_control(use_REML=F, run_model=F,quiet=TRUE, getJointPrecision = TRUE,newton_loops=0)
+# control_dsem <- dsem_control(use_REML=FALSE, run_model=ifelse(fit_type == 'ExtDsem',TRUE,FALSE),
+#                                  getsd=TRUE, trace=100, newton_loops=1)
+fit_dsem_DAG1_nobetas_null = dsem(sem=sem_DAG1_nobetas, tsdata=ts(ESPdata_DAG1_rec), family=family, control=control )
+
+# new map and pars ## turn off estimation of obs error at specified value
+new_map_DAG1_nobetas = fit_dsem_DAG1_nobetas_null$tmb_inputs$map
+new_map_DAG1_nobetas$lnsigma_j <- factor(rep(NA, length=length(new_map_DAG1_nobetas$lnsigma_j)))
+new_pars_DAG1_nobetas <- fit_dsem_DAG1_nobetas_null$tmb_inputs$parameters
+new_pars_DAG1_nobetas$lnsigma_j <- rep(log(0.1), length=length(new_pars_DAG1_nobetas$lnsigma_j))
+
+new_control=dsem_control(use_REML=F, run_model=TRUE,quiet=TRUE, 
+                         getJointPrecision = TRUE,parameters=new_pars_DAG1_nobetas, map=new_map_DAG1_nobetas)
+
+fit_dsem_DAG1_nobetas_sd0.1 = dsem( sem=sem_DAG1_nobetas, tsdata=ts(ESPdata_DAG1_rec), family=family, control=new_control)
+fit_dsem_DAG1_nobetas_sd0.1$version <- 'dsem_DAG1_nobetas'
+fit_dsem_DAG1_sd0.1$version <- 'dsem_DAG1'
+
+dsem_par_plot(list(a=fit_dsem_DAG1_nobetas_sd0.1,b=fit_dsem_DAG1_sd0.1))
+```
+
+
+### checking Q
+
+```{r}
+
+Q <- fit_dsem_DAG1_nobetas_sd0.1$sdrep$jointPrecision
+Qinv <- cov2cor(solve(Q))
+
+corrplot::corrplot(Qinv)
+
+```
+
+### Simulate
+
+
+```{r}
+# /!\ 1000 c'est long
+nsims = 500#1000
+
+
+sim_dsem_DAG1_nobetas_sd0.1_none <- simulate(object = fit_dsem_DAG1_nobetas_sd0.1,nsim=nsims,seed=120,
+                                     variance = 'none',
+                               resimulate_gmrf = FALSE,ignoreNAs = TRUE,full = TRUE)
+
+sim_dsem_DAG1_nobetas_sd0.1_random <- simulate(object = fit_dsem_DAG1_nobetas_sd0.1,nsim=nsims,seed=120,
+                                       variance = 'random',
+                                       resimulate_gmrf = FALSE,ignoreNAs = TRUE,full = TRUE)
+
+sim_dsem_DAG1_nobetas_sd0.1_both <- simulate(object = fit_dsem_DAG1_nobetas_sd0.1,nsim=nsims,seed=120,variance = 'both',
+                                     resimulate_gmrf = F,ignoreNAs = TRUE,full = TRUE)
+```
+
+### Plot simulate trends
+
+```{r}
+```
+
+
+### Refit
+
+
+```{r}
+
+max_simu = 500#nsims
+refit_dsem_DAG1_nobetas_none <- refit_dsem_DAG1_nobetas_random <-refit_dsem_DAG1_nobetas_both <- list()
+
+# easy way: a loop
+for(i in 1:max_simu){
+  # for variance = none
+  refit_dsem_DAG1_nobetas_none[[i]] = dsem( sem=sem_DAG1_nobetas, tsdata=sim_dsem_DAG1_nobetas_sd0.1_none[[i]]$y_tj, family=family, control=new_control)
+  refit_dsem_DAG1_nobetas_none[[i]]$version <- i
+
+  # for variance = random
+  refit_dsem_DAG1_nobetas_random[[i]] = dsem( sem=sem_DAG1_nobetas, tsdata=sim_dsem_DAG1_nobetas_sd0.1_random[[i]]$y_tj, family=family, control=new_control)
+  refit_dsem_DAG1_nobetas_random[[i]]$version <- i
+
+  # for variance = both
+  refit_dsem_DAG1_nobetas_both[[i]] = dsem( sem=sem_DAG1_nobetas, tsdata=sim_dsem_DAG1_nobetas_sd0.1_both[[i]]$y_tj, family=family, control=new_control)
+  refit_dsem_DAG1_nobetas_both[[i]]$version <- i
+}
+
+
+```
+
+### check fit convergence
+
+```{r}
+
+
+purrr::map_dfr(refit_dsem_DAG1_nobetas_none,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_DAG1_nobetas_random,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+purrr::map_dfr(refit_dsem_DAG1_nobetas_both,function(x){data.frame(sim=x$version,conv=x$opt$message)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+
+```
+
+
+### Plot parameter estimation
+
+```{r}
+
+refit_dsem_DAG1_nobetas_all  <- purrr::map_dfr(refit_dsem_DAG1_nobetas_none,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+  mutate(variance = 'none',GMRF='FALSE') %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_DAG1_nobetas_random,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'random',GMRF='FALSE') ) %>% 
+  
+  bind_rows(purrr::map_dfr(refit_dsem_DAG1_nobetas_both,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+    mutate(variance = 'both',GMRF='FALSE') ) %>% 
+  
+  # bind_rows(purrr::map_dfr(refit_dsem_DAG1_GMRF_random,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+  #   mutate(variance = 'random',GMRF='TRUE') ) %>% 
+  # 
+  # bind_rows(purrr::map_dfr(refit_dsem_DAG1_GMRF_none,function(x){summary(x) %>% mutate(sim=x$version)}) %>% 
+  #   mutate(variance = 'none',GMRF='TRUE') ) %>% 
+  # 
+  # add inital fit estimates
+  bind_rows(summary(fit_dsem_DAG1_nobetas_sd0.1) %>% mutate(sim=0,variance='',GMRF='')) %>% 
+  
+  # add parameter meaning 
+  mutate(param=ifelse(first!=second,'causal_link',
+                        ifelse(direction==1,'AR1correlation','variance'))) %>% 
+
+  # add another thing
+  mutate(par_name=ifelse(param=='causal_link',name,first)) %>% 
+  #compute relative error
+  group_by(path) %>% 
+  mutate(RE0 = (Estimate[which(sim==0)]-Estimate)/Estimate,
+         RE = (Estimate-Estimate[which(sim==0)])/Estimate[which(sim==0)]) %>% 
+  filter(variance !='') 
+  
+  #plot 3 variance type GMRF = F
+refit_dsem_DAG1_nobetas_all %>% 
+  filter(sim<501,GMRF=="FALSE") %>%
+  filter(!name %in%c('AR4','AR6')) %>%
+  ggplot()+geom_boxplot(aes(first,RE,fill=variance))+
+  geom_hline(yintercept=0) + 
+  labs(title=paste('GMRF=F, nsim = ',length(refit_dsem_DAG1_none))) + facet_wrap(~param,scale='free_y')+#
+   theme(axis.text.x = element_text(angle=45),legend.position = 'bottom')
+
+
+
+```
+
+
+
+# 8. SET UP INTDSEM SELF-SIMULATION FRAMEWORK
+
+## 8.1 1st try
+
+
+### DAG1
+
+```{r}
+
+sem_DAG1 = "
+  # link, lag, param_name, start_value
+
+  #internal data relation
+  Spr_SST -> Spr_SST,1,AR1
+  Spr_Larvae_Shelikof -> Spr_Larvae_Shelikof,1,AR2
+  Sum_LCopepod_Shelikof -> Sum_LCopepod_Shelikof,1,AR3
+  Sum_OffYOY_Shelikof -> Sum_OffYOY_Shelikof,1,AR4
+  Sum_NearYOY_Kodiak -> Sum_NearYOY_Kodiak,1,AR5
+  Sum_Euph_Kodiak -> Sum_Euph_Kodiak,1,AR6
+  recdevs <-> recdevs, 0, sigmaR, 1
+
+  #causal relation
+  Spr_SST -> Spr_Larvae_Shelikof, 0, SST_to_larvae#,1
+  Spr_Larvae_Shelikof -> Sum_OffYOY_Shelikof,0, larvae_to_offYOY#,1
+  Sum_LCopepod_Shelikof -> Sum_OffYOY_Shelikof,0, copepod_to_offYOY#,1
+  Sum_Euph_Kodiak  -> Sum_OffYOY_Shelikof, 0, euph_to_offYOY#,1
+  Sum_OffYOY_Shelikof -> Sum_NearYOY_Kodiak, 0, offYOY_to_nearYOY#,1
+  #Sum_Euph_Kodiak  -> Sum_NearYOY_Kodiak, 0, euph_to_nearYOY#,1
+  Sum_NearYOY_Kodiak -> recdevs, 1,nearYOY_to_R#,1
+  #Sum_Euph_Kodiak  -> recdevs, 1, euph_to_R#,1
+"
+
+```
+
+
+### Set ESP data and null dsem fit
+
+
+```{r}
+##new ESPData wo Euph and only 1y of proj
+ny_proj=1
+duration_wproj = c(duration,duration+ny_proj)
+ESPdata_DAG1_rec <- bind_rows(data.frame(Year=c(1970:1976)), dat1[,-1]) %>%
+  select(c(all_of(var_of_interest2))) %>% #names()
+  mutate_all(.funs =scale ) %>%
+  add_row(Spr_SST=rep(NA,ny_proj)) %>% #select(-c(Sum_Euph_Kodiak,Sum_OffYOY_Shelikof,Sum_NearYOY_Kodiak)) %>% 
+  mutate(recdevs=c(fit_assess_usual$sd %>% filter(name=='dev_log_recruit') %>% pull(est),rep(NA,ny_proj))) %>% 
+  relocate(recdevs) 
+
+# first non fit
+family <- rep('normal',ncol(ESPdata_DAG1_rec))
+control <- dsem_control(use_REML=F, run_model=F,quiet=TRUE, getJointPrecision = TRUE,newton_loops=0)
+fit_dsem_DAG1_null = dsem(sem=sem_DAG1, tsdata=ts(ESPdata_DAG1_rec), family=family, control=control )
+
+#create new map & pars
+new_map_DAG1 = fit_dsem_DAG1_null$tmb_inputs$map
+new_map_DAG1$lnsigma_j <- factor(rep(NA, length=length(new_map_DAG1$lnsigma_j)))
+new_pars_DAG1 <- fit_dsem_DAG1_null$tmb_inputs$parameters
+new_pars_DAG1$lnsigma_j <- rep(log(0.1), length=length(new_pars_DAG1$lnsigma_j))
+
+```
+
+
+### Data pk + dsem
+
+```{r}
+
+input_assess <- prepare_pk_input(path="../source", modfile='goa_pk_dsem',
+                                 datfile='../data/2023/pk23_10.txt', version='DAG1_sd0.1')#
+
+
+## stack on the dsem inputs to the assessment ones
+input_int_dsem_DAG1 <- input_assess
+
+#dat
+input_int_dsem_DAG1$dat <- c(input_assess$dat, fit_dsem_DAG1_null$tmb_inputs$dat)
+input_int_dsem_DAG1$dat$y_tj[,1] <- NA
+input_int_dsem_DAG1$dat$Ftarget <- rep(0.2630716,ny_proj) # set duration of projections
+input_int_dsem_DAG1$dat$indxsurv_log_sd4 <- input_assess$dat$indxsurv_log_sd4*5 #decrease weight of some indices
+input_int_dsem_DAG1$dat$indxsurv_log_sd5 <- input_assess$dat$indxsurv_log_sd5*5 #decrease weight of some indices
+
+#pars
+input_int_dsem_DAG1$pars <- c(input_assess$pars, fit_dsem_DAG1_null$tmb_inputs$parameters)
+input_int_dsem_DAG1$pars$lnsigma_j <- rep(log(0.1), length=length(fit_dsem_DAG1_null$tmb_inputs$parameters$lnsigma_j)) #fixed value
+
+#map
+input_int_dsem_DAG1$map <- c(input_assess$map, fit_dsem_DAG1_null$tmb_inputs$map)
+input_int_dsem_DAG1$map$mu_j <- factor(c(NA,2:ncol(ESPdata_DAG1_rec))) # map off recdev mean since already a parameter
+input_int_dsem_DAG1$map$sigmaR <- NULL ## took out of model
+input_int_dsem_DAG1$map$lnsigma_j <- factor(rep(NA, length=length(fit_dsem_DAG1_null$tmb_inputs$map$lnsigma_j))) #no estimated
+
+#random
+input_int_dsem_DAG1$random <- c(input_assess$random, fit_dsem_DAG1_null$tmb_inputs$random)
+
+```
+
+### Inital models (int and ext) fit
+
+```{r}
+# EXTERNAL
+ESPdata_DAG1_recNA <- ESPdata_DAG1_rec %>% mutate(recdevs=NA)
+new_control=dsem_control(use_REML=F, run_model=TRUE,quiet=TRUE, 
+                         getJointPrecision = TRUE,parameters=new_pars_DAG1, map=new_map_DAG1)
+fit_dsem4int_DAG1_sd0.1 = dsem( sem=sem_DAG1, tsdata=ts(ESPdata_DAG1_rec), family=family, control=new_control)
+fit_dsem4int_DAG1_sd0.1$version <- "DAG1_sd0.1" 
+# causal_plot(fits=list(fit_dsem4int_DAG1_sd0.1))
+
+
+#INTERNAL
+
+# dyn.unload(dynlib('source/goa_pk_dsem'))
+# compile('../source/goa_pk_dsem.cpp')
+# dyn.load(dynlib('../source/goa_pk_dsem'))
+fit_assess_dsem_DAG1_sd0.1 <- fit_pk(input=input_int_dsem_DAG1, getsd=TRUE, newtonsteps=1, 
+                                     do.fit=TRUE,save.sdrep = TRUE,filename = 'IntDsem_DAG1_sd0.1.RDS')
+
+# fit_assess_dsem_DAG1_sd0.1 <- suppressMessages(fit_pk(input=input_int_dsem_DAG1, getsd=TRUE, newtonsteps=1, 
+#                                      do.fit=TRUE,save.sdrep = TRUE,filename = NULL,verbose=FALSE))
+
+
+class(fit_assess_dsem_DAG1_sd0.1) <- c(class(fit_assess_dsem_DAG1_sd0.1),'assessdsem')
+fit_assess_dsem_DAG1_sd0.1$sem_full <- fit_dsem_DAG1_null$sem_full#fit_dsem4int_DAG1_sd0.1$sem_full
+
+##convergence checks
+# fit_assess_dsem_DAG1_sd0.1$opt$Convergence_check
+# fit_assess_dsem_DAG1_sd0.1$opt$evaluations
+# 
+# max_gr <- which.max(abs(fit_assess_dsem_DAG1_sd0.1$obj$gr()));max_gr
+# fit_assess_dsem_DAG1_sd0.1$obj$gr()[max_gr]
+# 
+# fit_assess_dsem_DAG1_sd0.1$obj$env$last.par.best[max_gr]
+# fit_assess_dsem_DAG1_sd0.1$obj$env$last.par.best[(max_gr-10):(max_gr+10)]
+# 
+# cbind(fit_assess_dsem_DAG1_sd0.1$sem_full,fit_assess_dsem_DAG1_sd0.1$sd %>% filter(name=='beta_z'))
+# fit_assess_dsem_DAG1_sd0.1$parList$x_tj
+# fit_assess_dsem_DAG1_sd0.1$sd %>% filter(name=='lnsigma_j')
+# 
+# dsem_par_plot(fits=list(a=fit_assess_dsem_DAG1_sd0.1))
+# causal_plot(fits=list(fit_dsem4int_DAG1_sd0.1,fit_assess_dsem_DAG1_sd0.1))
+
+#some cleanup
+ # rm(list=c('sem_DAG4','ESPdata_DAG4_rec','fit_dsem_DAG4_null','new_map_DAG4','new_pars_DAG4','input_int_dsem_DAG4','fit_dsem4int_DAG4_sd0.1','fit_assess_dsem_DAG4_sd0.1'))
+```
+
+
+### Simulation step 0: fit internal dsem
+
+```{r}
+fit_assess_dsem_DAG1_sd0.1
+```
+
+### Simulation step 1: fit + simulate external dsem
+
+```{r}
+# fit
+ESPdata_DAG1_recInt <- ESPdata_DAG1_rec %>%  
+  mutate(recdevs=fit_assess_dsem_DAG1_sd0.1$sd %>% filter(name =='x_tj') %>% filter(year<2025) %>% pull(est))
+new_control=dsem_control(use_REML=F, run_model=TRUE,quiet=TRUE, 
+                         getJointPrecision = TRUE,parameters=new_pars_DAG1, map=new_map_DAG1)
+fit_dsem4sim_DAG1_sd0.1 = dsem( sem=sem_DAG1, tsdata=ts(ESPdata_DAG1_recInt), family=family, control=new_control)
+
+summary(fit_dsem4sim_DAG1_sd0.1)
+
+# simulate
+nsims = 1#1000
+
+sim_dsem4sim_DAG1_sd0.1_none <- simulate(object = fit_dsem4sim_DAG1_sd0.1,nsim=nsims,seed=120,
+                                     variance = 'none',resimulate_gmrf = TRUE,ignoreNAs = TRUE,full = TRUE)
+
+# class(fit_assess_dsem_DAG1) <- c(class(fit_assess_dsem_DAG1),'dsem')
+# fit_assess_dsem_DAG1$internal$control <- new_control
+ # simulate(object = sim_dsem4sim_DAG1_sd0.1_none,nsim=1,seed=120,
+ #                                     variance = 'none',resimulate_gmrf = FALSE,ignoreNAs = TRUE,full = TRUE)
+
+
+```
+
+### Simulation step 2: build a intDsem obj
+
+```{r}
+# Prhat2 <- fit_dsem4int_DAG1_sd0.1$obj$env$parList()
+# 
+# all(Prhat2$x_tj == sim_dsem4int_DAG1_sd0.1_both[[i]]$z_tj)
+
+i=1
+input_int4simu_dsem_DAG1 <- input_int_dsem_DAG1
+input_int4simu_dsem_DAG1$pars$x_tj <- sim_dsem4sim_DAG1_sd0.1_none[[i]]$z_tj
+input_int4simu_dsem_DAG1$dat$multN_fsh[1] <- 1
+
+fit_assess4sim_dsem_DAG1_sd0.1 <- fit_pk(input=input_int4simu_dsem_DAG1, getsd=TRUE, newtonsteps=1, 
+                                     do.fit=FALSE,save.sdrep = TRUE,filename = NULL)
+# obj <- MakeADFun(data=input$dat, parameters=input$pars,
+#                    map=input$map, random=input$random,
+#                    DLL=input$modfile, silent=TRUE)
+
+
+```
+
+### Simulation step 3: simulate intDsem obj
+
+```{r}
+
+# fit_assess4sim_dsem_DAG1_sd0.1$simulate() %>% names()
+# fit_assess4sim_dsem_DAG1_sd0.1$simulate() %>% length()
+
+sim_assess4sim_DAG1_sd0.1 <- fit_assess4sim_dsem_DAG1_sd0.1$simulate()
+# replicate(10, obj$simulate())
+```
+
+### Simulation step 4: new intDsem obj + fit
+
+```{r}
+
+# Zstar_name <- NULL
+input_int_dsem_DAG1_tmp <- input_int_dsem_DAG1
+for (x in 1:length( input_int_dsem_DAG1_tmp$dat)){
+  for(z in 1:length(sim_assess4sim_DAG1_sd0.1)){
+     if(names( input_int_dsem_DAG1_tmp$dat)[x]==names(sim_assess4sim_DAG1_sd0.1)[z]){
+       #input_int_dsem_DAG1_tmp$dat[x] <-  sim_assess4sim_DAG1_sd0.1[z];
+       print(z);Zstar_name = c(Zstar_name,z)}
+  }
+}
+names(sim_assess4sim_DAG1_sd0.1)
+names(sim_assess4sim_DAG1_sd0.1)[Zstar_name]
+# x=names(dat)
+# y=sim[x]
+#check data similarity
+input_int_dsem_DAG1$dat$multN_fsh==sim_assess4sim_DAG1_sd0.1$multN_fsh
+input_int_dsem_DAG1$dat$srvlenp2==sim_assess4sim_DAG1_sd0.1$srvlenp2
+input_int_dsem_DAG1$dat$multNlen_fsh
+
+## Manually change data
+#  dsem
+input_int_dsem_DAG1_tmp$dat$y_tj <-  sim_dsem4sim_DAG1_sd0.1_none[[i]]$y_tj #ok
+input_int_dsem_DAG1_tmp$dat$y_tj[,1] <- NA
+
+sim_assess4sim_DAG1_sd0.1$Espawnbio
+# stock assessment
+input_int_dsem_DAG1_tmp$dat$cattot <-  sim_assess4sim_DAG1_sd0.1$cattot #ok
+input_int_dsem_DAG1_tmp$dat$catp <-  sim_assess4sim_DAG1_sd0.1$catp #lead to a pb
+# input_int_dsem_DAG1_tmp$dat$catp[1,] <-  input_int_dsem_DAG1$dat$catp[1,]
+input_int_dsem_DAG1_tmp$dat$indxsurv1 <-  sim_assess4sim_DAG1_sd0.1$indxsurv1 ##ok
+input_int_dsem_DAG1_tmp$dat$indxsurv2 <-  sim_assess4sim_DAG1_sd0.1$indxsurv2 ##ok
+input_int_dsem_DAG1_tmp$dat$indxsurv3 <-  sim_assess4sim_DAG1_sd0.1$indxsurv3 ##ok
+input_int_dsem_DAG1_tmp$dat$indxsurv6 <-  sim_assess4sim_DAG1_sd0.1$indxsurv6 ##ok
+
+input_int_dsem_DAG1_tmp$dat$srvp1 <-  sim_assess4sim_DAG1_sd0.1$srvp1##ok
+input_int_dsem_DAG1_tmp$dat$srvp2 <-  sim_assess4sim_DAG1_sd0.1$srvp2##ok
+input_int_dsem_DAG1_tmp$dat$srvp3 <-  sim_assess4sim_DAG1_sd0.1$srvp3##ok
+input_int_dsem_DAG1_tmp$dat$srvp6 <-  sim_assess4sim_DAG1_sd0.1$srvp6##ok
+
+input_int_dsem_DAG1_tmp$dat$srvlenp1 <-  sim_assess4sim_DAG1_sd0.1$srvlenp1##ok
+input_int_dsem_DAG1_tmp$dat$srvlenp2 <-  sim_assess4sim_DAG1_sd0.1$srvlenp2##ok
+input_int_dsem_DAG1_tmp$dat$srvlenp3 <-  sim_assess4sim_DAG1_sd0.1$srvlenp3##ok
+input_int_dsem_DAG1_tmp$dat$srvlenp6 <-  sim_assess4sim_DAG1_sd0.1$srvlenp6##ok
+
+
+# input_int4simu_dsem_DAG1 <- input_int_dsem_DAG1
+# input_int4simu_dsem_DAG1$pars$x_tj <- sim_dsem4int_DAG1_sd0.1_both[[i]]$z_tj
+# 
+# a <- input_int4simu_dsem_DAG1$dat %>% names()
+# b <- fit_assess_dsem_DAG1_sd0.1$simulate() %>% names()
+# 
+# match(a,b)
+# 
+# input_int4simuGO_dsem_DAG1 <- input_int4simu_dsem_DAG1
+# input_int4simuGO_dsem_DAG1$dat <- fit_assess_dsem_DAG1_sd0.1$simulate()
+# input_int4simuGO_dsem_DAG1$dat$y_tj <- sim_dsem4int_DAG1_sd0.1_both[[i]]$y_tj
+
+
+re_fit_assess_dsem_DAG1_sd0.1 <- fit_pk(input=input_int_dsem_DAG1_tmp, getsd=TRUE, newtonsteps=1, 
+                                     do.fit=TRUE,save.sdrep = TRUE,filename = NULL)
+
+##convergence checks
+# re_fit_assess_dsem_DAG1_sd0.1$opt$Convergence_check
+# re_fit_assess_dsem_DAG1_sd0.1$opt$evaluations
+ re_fit_assess_dsem_DAG1_sd0.1$opt$diagnostics
+ 
+# re_fit_assess_dsem_DAG1_sd0.1$opt$diagnostics %>% filter(final_gradient==max(final_gradient))
+# max_gr <- which.max(abs(re_fit_assess_dsem_DAG1_sd0.1$obj$gr(re_fit_assess_dsem_DAG1_sd0.1$opt$par)));max_gr
+# re_fit_assess_dsem_DAG1_sd0.1$obj$gr()[max_gr]
+# 
+# re_fit_assess_dsem_DAG1_sd0.1$obj$env$last.par.best[max_gr]
+# re_fit_assess_dsem_DAG1_sd0.1$obj$env$last.par.best[(max_gr-10):(max_gr+10)]
+# 
+# # 
+
+
+```
+
+### Simulation step 5: plot simulated and RE
+
+```{r}
+re_fit_assess_dsem_DAG1_sd0.1$sd %>% pull(name) %>% unique()
+
+
+#SSB
+re_fit_assess_dsem_DAG1_sd0.1$sd %>% filter(name=='Espawnbio') %>% 
+  ggplot()+geom_line(aes(year,est))+geom_ribbon(aes(x=year,ymin=lwr,ymax=upr),alpha=0.2)+
+  geom_line(aes(year,sim_assess4sim_DAG1_sd0.1$Espawnbio),col='red')#data=dataframe(year=),
+
+#rec
+re_fit_assess_dsem_DAG1_sd0.1$sd %>% filter(name=='recruit') %>% 
+  ggplot()+geom_line(aes(year,est))+geom_ribbon(aes(x=year,ymin=lwr,ymax=upr),alpha=0.2)+
+  geom_line(aes(year,sim_assess4sim_DAG1_sd0.1$recruit),col='red')
+
+#catch
+data.frame(year=sim_assess4sim_DAG1_sd0.1$years,est=re_fit_assess_dsem_DAG1_sd0.1$rep$Ecattot) %>% 
+    ggplot()+geom_line(aes(year,est))+#geom_ribbon(aes(x=year,ymin=lwr,ymax=upr),alpha=0.2)+
+  geom_line(aes(year,sim_assess4sim_DAG1_sd0.1$cattot),col='red')
+
+
+```
+
+## 8.2 with function
+
+
+### Run simulations
+
+```{r}
+
+simu20new2 <- simulate_AssessDsem(sem=sem_DAG1,fit_assess_dsem =fit_assess_dsem_DAG1_sd0.1,
+                    family= family <- rep('normal',ncol(ESPdata_DAG1_rec)),nsims = 20)
+
+# simu2 <- simu
+# simu <- simu20std
+simu <- simu20new2
+```
+
+### Check cv
+```{r}
+
+
+# get_std(fits=simu) %>%pull(name) %>% unique()
+# 
+# get_std(fits=simu) %>%
+#   filter(name %in%c('Espawnbio','mean_log_recruit','recruit','log_recruit','beta_z','Ecattot'))
+purrr::map_dfr(simu,function(x){list(sim=x$version,conv=x$opt$Convergence_check)})%>%
+  group_by(conv) %>% summarize(n=length(sim))
+# purrr::map(simu,function(x){x$})
+
+purrr::map_dfr(simu,function(x){list(sim=x$version,conv=x$opt$Convergence_check,max_grad=x$opt$max_gradient)}) 
+```
+
+### Plot results
+
+#### Parameters (FE)
+
+```{r}
+sem_full<- fit_dsem_DAG1_null$sem_full %>% as.data.frame()
+get_std(fits=simu) %>%
+    filter(name %in%c('mean_log_recruit','beta_z')) %>% 
+  mutate(type='re-estimated',
+         name2=rep(c('mean_log_recruit',sem_full$name),length(simu))) %>% select(name2,year,version,type,est) %>% 
+ 
+  #add true (initially estimated) values
+  bind_rows(data.frame(name2='mean_log_recruit',year=1970,
+                       est=fit_assess_dsem_DAG1_sd0.1$parList$mean_log_recruit,
+                          type='true')) %>% 
+  bind_rows(data.frame(name2=sem_full$name,
+                       year=1970:(1970+length(fit_assess_dsem_DAG1_sd0.1$parList$beta_z)-1),
+                          est=fit_assess_dsem_DAG1_sd0.1$parList$beta_z,
+                          type='true')) %>% 
+  
+  #compute RE
+  group_by(year,name2) %>% 
+  mutate(RE=(est-est[which(type=='true')])/est[which(type=='true')]) %>% 
+  
+  filter(type=='re-estimated') %>% 
+  
+  #improve dsem par name
+  mutate(par_type=ifelse(name2=='mean_log_recruit','assessement','dsem')) %>% 
+  # filter(!name2 %in% c('AR4','AR6','copepod_to_offYOY')) %>% 
+  
+  ggplot(aes(x=name2,y=RE,group=name2,fill=par_type))+
+  # geom_point(aes(x=name2,y=RE,group=name2,col=version))+
+  geom_boxplot()+
+  geom_hline(yintercept=0)+
+  theme(legend.position = 'bottom',
+        axis.text.x =element_text(angle=45))
+  # facet_wrap(~par_type,ncol=1)#,scale='free_y')
+
+
+```
+
+
+
+#### Time series
+
+```{r}
+# simu[[1]]$rep %>% names()
+# names(simu[[1]]$rep)[grepl('log', names(simu[[1]]$rep))]
+# simu[[1]]$simu %>% names()
+# names(simu[[1]]$simu)[grepl('rec', names(simu[[1]]$simu))] 
+
+# plot values
+
+purrr::map_dfr(.x=simu,.f=function(x){list(year=x$simu_int_dsem$years,Ecattot=x$simu_int_dsem$Ecattot,
+                                             Espawnbio=x$simu_int_dsem$Espawnbio,recruit=x$simu_int_dsem$recruit,
+                                           version=as.factor(x$version))}) %>% 
+  pivot_longer(cols=-c(year,version),values_to = 'est') %>% 
+  mutate(type='true') %>%
+  
+  #grab true values from std -> probably not needed
+  # bind_rows(get_std(fits=simu) %>%
+  #   filter(name %in%c('Espawnbio','mean_log_recruit','recruit','log_recruit','beta_z')) %>%
+  #   mutate(type='re-estimated')) %>%
+  
+  #grab true values from rep 
+  bind_rows(get_rep(fits=simu,slot ='Ecattot') %>%
+              mutate(type='re-estimated',version=as.factor(version)) %>% dplyr::rename(est=value)) %>% 
+  bind_rows(get_rep(fits=simu,slot ='Espawnbio') %>%
+              mutate(type='re-estimated',version=as.factor(version)) %>% dplyr::rename(est=value)) %>% 
+  bind_rows(get_rep(fits=simu,slot ='recruit') %>%
+              mutate(type='re-estimated',version=as.factor(version)) %>% dplyr::rename(est=value)) %>% 
+  
+  # filter(name%in%c('Espawnbio','recruit','Ecattot')) %>% 
+  
+  ggplot(aes(x=year,y=est,,col=version,lty=type))+#ymin=lwr,ymax=uprfill=version,
+  geom_line()+facet_wrap(~name,scale='free_y',ncol=1)#geom_ribbon(alpha=0.2)+
+  
+  
+  
+
+```
+### plot RE
+
+```{r}
+# plot values by version
+
+purrr::map_dfr(.x=simu,.f=function(x){list(year=x$simu_int_dsem$years,Ecattot=x$simu_int_dsem$Ecattot,
+                                             Espawnbio=x$simu_int_dsem$Espawnbio,recruit=x$simu_int_dsem$recruit,
+                                           version=as.factor(x$version))}) %>% 
+  pivot_longer(cols=-c(year,version),values_to = 'est') %>% 
+  mutate(type='true') %>% 
+  bind_rows(get_std(fits=simu) %>%
+    filter(name %in%c('Espawnbio','recruit')) %>%#'mean_log_recruit','log_recruit','beta_z','Ecattot'
+    mutate(type='re-estimated')) %>%
+  bind_rows(get_rep(fits=simu,slot ='Ecattot') %>% mutate(type='re-estimated',version=as.factor(version)) %>% 
+              dplyr::rename(est=value)) %>% 
+  
+  group_by(year,name,version) %>% 
+  mutate(RE=(est-est[which(type=='true')])/est[which(type=='true')]) %>% 
+  
+  filter(type=='re-estimated') %>% 
+  
+  ggplot(aes(x=year,y=RE,col=version))+
+  geom_line()+#geom_ribbon(alpha=0.2)+
+    geom_hline(yintercept=0)+
+    facet_wrap(~name,ncol=1)
+  
+
+# plot boxplot?
+
+purrr::map_dfr(.x=simu,.f=function(x){list(year=x$simu_int_dsem$years,Ecattot=x$simu_int_dsem$Ecattot,
+                                             Espawnbio=x$simu_int_dsem$Espawnbio,recruit=x$simu_int_dsem$recruit,
+                                           version=as.factor(x$version))}) %>% 
+  pivot_longer(cols=-c(year,version),values_to = 'est') %>% 
+  mutate(type='true') %>% 
+  
+  # add re estimated value from std
+  bind_rows(get_std(fits=simu) %>%
+  filter(name %in%c('Espawnbio','recruit')) %>%#'mean_log_recruit','log_recruit','beta_z','Ecattot'
+    mutate(type='re-estimated')) %>%
+  
+  # add re estimated value from rep
+  bind_rows(get_rep(fits=simu,slot ='Ecattot') %>% mutate(type='re-estimated',version=as.factor(version)) %>% 
+              dplyr::rename(est=value)) %>% 
+  
+  #compute RE
+  group_by(year,name,version) %>% 
+  mutate(RE=(est-est[which(type=='true')])/est[which(type=='true')]) %>% 
+  
+  filter(type=='re-estimated') %>% 
+  
+  ggplot(aes(x=year,y=RE,group=year))+
+  geom_boxplot()+
+  geom_hline(yintercept=0)+
+    facet_wrap(~name,ncol=1,scale='free_y')
+  
+```
+
