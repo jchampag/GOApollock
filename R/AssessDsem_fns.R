@@ -8,7 +8,7 @@
 
 #' Fit a model (assessment, dsem or assessment+dsem) to data
 #' @param fit_type character chain indicating which model to fit
-#'   "AssessOnly", "ExtDSEM" or "AssessDsem"
+#'   "AssessOnly", "ExtDsem" or "AssessDsem"
 #' @param fit_name name to be passed in \code{version} aurgument from \code{\link{fit_pk}}() and used if \code{save_fit=TRUE}
 #' @param ESPdata Dataset with environmental date if a DSEM model is fit
 #' @param sem sem statement from \code{\link{dsem}}() if a DSEM model is fit
@@ -24,12 +24,13 @@
 #'   without warning.
 #' @export
 
-'AssessDsem_fit' <- function(fit_type = "AssessOnly", #or "ExtDSEM" or "AssessDsem"
+'AssessDsem_fit' <- function(fit_type = "AssessOnly", #or "ExtDsem" or "AssessDsem"
                              fit_name = '_1' ,
                              ESPdata,
                              sem=sem,
                              sem_family =  rep('fixed', ncol(ESPdata)),
                              ny_proj=15,
+                             newtonsteps=1,
                              Assess_recdevs= NULL, #if ExtDsem it it requiered to have it
                              save_fit = TRUE
 ){
@@ -55,7 +56,7 @@
 
       #fit
       fit_assess <- fit_pk(input=input_assess,
-                           getsd=TRUE, newtonsteps=1,
+                           getsd=TRUE, newtonsteps=newtonsteps,
                            save.sdrep = TRUE,
                            filename = if(save_fit){paste0(fit_type,fit_name,'.RDS')}else{NULL})
 
@@ -72,10 +73,11 @@
 
     # should it be done externally because then I'm loosing the possibility to change the control object...?
     control_dsem <- dsem_control(use_REML=FALSE, run_model=ifelse(fit_type == 'ExtDsem',TRUE,FALSE),
-                                 getsd=TRUE, trace=100, newton_loops=0)
+                                 getsd=TRUE, trace=100, newton_loops=1)
 
     fit_dsem <- dsem(sem=sem, tsdata=ts(ESPdata), family=sem_family,
                      estimate_delta0=FALSE, control=control_dsem)
+    fit_dsem$version <- paste0(fit_type,fit_name)
 
     out <- fit_dsem
   }
@@ -91,16 +93,16 @@
     input_assessDsem$random <- c(input_assess$random, fit_dsem$tmb_inputs$random)
 
     #specific mapping
-    input_assessDsem$map$mu_j <- factor(c(NA,2:ncol(ESPdata))) #pourquoi pas 1:ncol()? on s'en fiche pe?
+    input_assessDsem$map$mu_j <- factor(c(NA,2:ncol(ESPdata))) #
     input_assessDsem$pars$mu_j[1] <- 0 #already done by dsem, usefull?
     input_assessDsem$map$sigmaR <- NULL ## took out of model
 
     fit_assessDsem <- fit_pk(input=input_assessDsem,
-                             getsd=TRUE, newtonsteps=1, do.fit=1,
+                             getsd=TRUE, newtonsteps=newtonsteps, do.fit=1,
                              save.sdrep = TRUE,
                              filename = if(save_fit){paste0(fit_type,fit_name,'.RDS')}else{NULL})
 
-    fit_assessDsem <- c(fit_assessDsem,sem_full=fit_dsem$sem_full)
+    fit_assessDsem$sem_full <- fit_dsem$sem_full
     class(fit_assessDsem) <- c(class(fit_assessDsem),'assessdsem')
     out <- fit_assessDsem
   }
@@ -130,7 +132,7 @@
 #' @export
 
 'as_fitted_DAG_assessdsem' <- function (fit,
-                                     fit_null_dsem=NULL,#/!\ this part could be simplified, to evaluate later
+                                     #fit_null_dsem=NULL,#/!\ this part could be simplified, to evaluate later
                                      lag = c(0,1), direction = c(1,2),
                                      what = "Estimate",which.link='causal',
                                      out.type="matrix")
@@ -140,7 +142,7 @@
   }else{#cannot use summary(fit) for a 'assessdsem' output, this part replace what it does
     if(all((class(fit)!='assessdsem'))){print('This function can only work with a dsem like output')}
 
-    model = fit_null_dsem$sem_full #/!\ this part could be simplified, to evaluate later
+    model = fit$sem_full#fit_null_dsem$sem_full #/!\ this part could be simplified, to evaluate later
     ParHat <- list('beta_z'= fit$sd %>% filter(name== 'beta_z') %>% pull(est),
                    'mu_j'= fit$sd %>% filter(name== 'mu_j') %>% pull(est))#,
 
@@ -170,13 +172,13 @@
   }
 }
 #
-as_fitted_DAG_assessdsem(fit=fits[[2]],#fit_assess_dsem_proj,#fit_ext_dsem_proj_dropidx,#fits[[1]],
-                         fit_null_dsem = NULL,#fit_ext_dsem_proj,
-                                        #fit_null_dsem=NULL,#/!\ this part could be simplified, to evaluate later
-                                        lag = c(0,1), direction = c(1,2),
-                                        what = "p_value",which.link='all',
-                                        out.type="matrix")
-
+# as_fitted_DAG_assessdsem(fit=fits[[1]],#fit_assess_dsem_proj,#fit_ext_dsem_proj_dropidx,#fits[[1]],
+#                          #fit_null_dsem = NULL,#fit_ext_dsem_proj,#NULL,#
+#                                         #fit_null_dsem=NULL,#/!\ this part could be simplified, to evaluate later
+#                                         lag = c(0,1), direction = c(1,2),
+#                                         what = "p_value",which.link='all',
+#                                         out.type="matrix")
+#
 #--------------------------------------------------------------------------#
 
 #Improvements to think of : none for now
@@ -186,6 +188,7 @@ as_fitted_DAG_assessdsem(fit=fits[[2]],#fit_assess_dsem_proj,#fit_ext_dsem_proj_
 #' @param ny_proj nb of year projected
 #' @param mean_log_rec value to add to recruitment deviations from dsem fit
 #' @param extDsem_name name to be passed out for the plot (only for ext dsem fits, pkfit uses version)
+#' @param points only lines or also diaply estimate points
 #' @return A plot
 #' @export
 
@@ -193,7 +196,8 @@ as_fitted_DAG_assessdsem(fit=fits[[2]],#fit_assess_dsem_proj,#fit_ext_dsem_proj_
 'rec_plot' <- function(fits,
                        ny_proj=15,
                        mean_log_rec=0,
-                       extDsem_name=NULL)
+                       extDsem_name=NULL,
+                       points= FALSE)
 
 
 {
@@ -216,8 +220,9 @@ as_fitted_DAG_assessdsem(fit=fits[[2]],#fit_assess_dsem_proj,#fit_ext_dsem_proj_
                              year=1970:(2023+ny_proj)) %>%
                     mutate(lwr=est-qnorm(0.975)*se,
                            upr=est+qnorm(0.975)*se,
-                           version=ifelse(is.null(extDsem_name),paste0("extDsem_",log_mean_rec_pointer),
-                                          paste0("extDsem_",extDsem_name[log_mean_rec_pointer]))))
+                           version=fits[[i]]$version))
+    #                          ifelse(is.null(extDsem_name),paste0("extDsem_",log_mean_rec_pointer),
+    #                                       paste0("extDsem_",extDsem_name[log_mean_rec_pointer]))))
     }
   }
 
@@ -226,11 +231,12 @@ as_fitted_DAG_assessdsem(fit=fits[[2]],#fit_assess_dsem_proj,#fit_ext_dsem_proj_
     geom_line(aes(col=version))+
     geom_ribbon(aes(fill=version),alpha=0.2)+
     labs(y="Estimated log recruitment")+
-    theme(legend.position='bottom')
+    theme(legend.position='bottom',legend.key.size = unit(1, 'cm'),legend.text = element_text(size=12),
+          axis.title = element_text(size=12),axis.text = element_text(size=10))+
+    scale_x_continuous(n.breaks = 10)+
+    geom_vline(xintercept=2023)
 
-
-  return(plt)
-
+  if(points){return(plt+geom_point(aes(col=version)))}else{return(plt)}
 }
 
 # fits=list(fit_assess_usual_proj,
@@ -240,11 +246,11 @@ as_fitted_DAG_assessdsem(fit=fits[[2]],#fit_assess_dsem_proj,#fit_ext_dsem_proj_
 
 
 # rec_plot(fits=list(fit_assess_usual_proj,
-#                    fit_ext_dsem_proj_dropidx,
+#                    fit_ext_dsem_proj,
 #                    fit_ext_dsem_proj_dropidx),
 #          ny_proj=15,
-#          mean_log_rec=c(0,1),
-#          extDsem_name = c('nodropidx','dropidx')     )
+#          mean_log_rec=c(0,1))#,
+#          #extDsem_name = c('nodropidx','dropidx')     )
 
 #--------------------------------------------------------------------#
 
@@ -280,7 +286,10 @@ as_fitted_DAG_assessdsem(fit=fits[[2]],#fit_assess_dsem_proj,#fit_ext_dsem_proj_
 
   plt <- tmp %>%
     ggplot(aes(x=version,ymin=lwr,y=est,ymax=upr))+geom_pointrange()+
-    coord_flip()+labs(x="Sigma R estimates")
+    geom_hline(yintercept=0)+
+    coord_flip()+labs(y="Sigma R estimates")+
+    theme(axis.title = element_text(size=14),axis.text = element_text(size=12))
+
 
   return(plt)
 }
@@ -289,10 +298,29 @@ as_fitted_DAG_assessdsem(fit=fits[[2]],#fit_assess_dsem_proj,#fit_ext_dsem_proj_
 #                       fit_assess_usual_proj,fit_assess_usual_proj_dropidx))
 
 
+
+#--------------------------------------------------------------#
+
+#Improvements to think of :
+
+#' Return a plot comparing the parameters estimated by dsem
+#' @param fits a list of fits to compare
+#' @param what which type of parameters are in the plot all/causal/variance/AR1
+#' @return A plot
+#' @export
+
+'compute_var_red' <- function(new_fit,ref_fit){
+  ref <- ref_fit$sd %>% filter(name=='sigmaR')%>% pull(est)
+  new <- new_fit$sd %>% filter(name=='beta_z') %>% filter(year==1970) %>% pull(est)
+
+  red = ((new^2)-(ref^2))/(ref^2)
+  return(red)
+}
+
 #----------------------------------------------------------------------#
 
 
-#Improvements to think of : add subtitle causal-link/p-value
+#Improvements to think of : add subtitle causal-link/p-value , have an automatic label related to the fit version
 # improve the DAG plot in general for ex:
 #   * changing color/size of arrow if the pvalue is low
 #   * having the pvalue plotted on the same graph
@@ -311,7 +339,7 @@ as_fitted_DAG_assessdsem(fit=fits[[2]],#fit_assess_dsem_proj,#fit_ext_dsem_proj_
   # tour =1
   for(i in seq_along(fits)){
 
-    plt_link[[i]] <- plot( (as_fitted_DAG_assessdsem(fit_null_dsem = fit_null_dsem_proj,fit=fits[[i]])),
+    plt_link[[i]] <- plot( (as_fitted_DAG_assessdsem(fit=fits[[i]])),
                            edge.width=1, type="width",
                            text_size=4, show.legend=FALSE,
                            arrow = grid::arrow(type='closed', 18, grid::unit(10,'points')) ) +
@@ -321,7 +349,7 @@ as_fitted_DAG_assessdsem(fit=fits[[2]],#fit_assess_dsem_proj,#fit_ext_dsem_proj_
     # tour=tour+2
   }
   for(i in seq_along(fits)){
-    plt_link[[length(fits)+i]]  <-  plot(  (as_fitted_DAG_assessdsem(fit_null_dsem = fit_null_dsem_proj,fit=fits[[i]],
+    plt_link[[length(fits)+i]]  <-  plot(  (as_fitted_DAG_assessdsem(fit=fits[[i]],
                                                              what = 'p_value')), edge.width=1, type="width",
                                    text_size=4, show.legend=FALSE, colors=c('black', 'black'),
                                    arrow = grid::arrow(type='closed', 18, grid::unit(10,'points')) ) +
@@ -353,11 +381,232 @@ as_fitted_DAG_assessdsem(fit=fits[[2]],#fit_assess_dsem_proj,#fit_ext_dsem_proj_
 
 #' Return a plot comparing the parameters estimated by dsem
 #' @param fits a list of fits to compare
+#' @param what which type of parameters are in the plot all/causal/variance/AR1
 #' @return A plot
 #' @export
+
+# dsem_par_plot(fits=list(fit_ext_dsem_proj_dropidx,fit_assess_dsem_proj_dropidx,fit_ext_dsem_proj),what='all')
+
+'dsem_par_plot' <- function(fits,what='all'){
+
+  tmp <- NULL
+  for(i in seq_along(fits)){
+
+    tmp <- tmp %>%
+      bind_rows(as_fitted_DAG_assessdsem(fit = fits[[i]],
+                          out.type = 'other',
+                          which.link = 'all') %>%
+      mutate(model=fits[[i]]$version))
+  }
+
+  tmp <- tmp %>%
+    mutate(lwr=Estimate-qnorm(0.975)*Std_Error,upr=Estimate+qnorm(0.975)*Std_Error) %>%
+    mutate(param=ifelse(first!=second,'causal_link',
+                        ifelse(direction==1,'AR1correlation','variance')))
+
+  minval <- min(tmp %>% filter(param!='variance') %>% pull(lwr))
+  maxval <- max(tmp %>% filter(param!='variance') %>% pull(upr))
+  if(abs(minval)<abs(maxval)){interval <- round(abs(maxval)+0.2,digits = 1)}else{interval <- round(abs(minval)+0.2,digits = 1)}#ceiling(abs(maxval))
+
+  maxval_var <- max(tmp %>% filter(param=='variance') %>% pull(upr))
+
+  plt1 <- tmp  %>%
+    filter(param=='causal_link') %>%
+    ggplot(aes(x=path,y=Estimate,ymin=lwr,ymax=upr,col=model))+
+    geom_pointrange(position=position_dodge(width=1)) +
+    facet_wrap(~param)+
+    geom_hline(yintercept = 0)+
+    ylim(-interval,interval)+
+    coord_flip()+theme(legend.position='none')
+
+  plt2 <- tmp %>%
+    filter(param=='AR1correlation') %>%
+    ggplot(aes(x=path,y=Estimate,ymin=lwr,ymax=upr,col=model))+
+    geom_pointrange(position=position_dodge(width=1)) +
+    facet_wrap(~param)+
+    geom_hline(yintercept = 0)+
+    ylim(-interval,interval)+
+    coord_flip()+theme(legend.position='bottom')
+
+  plt3 <- tmp %>%
+    filter(param=='variance') %>%
+    ggplot(aes(x=path,y=Estimate,ymin=lwr,ymax=upr,col=model))+
+    geom_pointrange(position=position_dodge(width=1)) +
+    facet_wrap(~param)+
+    geom_hline(yintercept = 0)+
+    ylim(0,maxval_var)+
+    coord_flip()+theme(legend.position='none')
+
+  plt <- ggarrange(plt1,plt2,plt3,ncol=3)#grid.arrange
+  if(what=='all'){return(plt)}
+  else if(what== 'causal'){return(plt1+theme(legend.position='bottom'))}
+  else if(what== 'AR1'){return(plt2)}
+  else if(what== 'variance'){return(plt3+theme(legend.position='bottom'))}
+
+}
+
+#--------------------------------------------------------------------#
+
+
+#Improvements to think of :
+
+#' Return a plot showing the estimated imput time series
+#' @param fits a list of fits to compare
 #'
-'dsem_par_plot' <- function(fits){
+#' @return A plot
+#' @export
+
+# fits=list(fit_ext_dsem_proj_dropidx,fit_assess_dsem_proj_dropidx)
+# TS_years = 1970:(2023+15)
+#
+# 'TS_plot' <- function(fits,TS_years){
+#
+#   tmp <- NULL
+#
+#   for(i in seq_along(fits)){
+#
+#     #get & format x_tj
+#     par_tmp = fits[[i]]$obj$env$parList()
+#     X_long <- par_tmp$x_tj %>% as.data.frame() %>%
+#       mutate(Year= TS_years,version=fits[[i]]$version) %>%
+#       pivot_longer(cols=-c(Year,version),values_to = 'estimates')
+#
+#     #get & format y_tj
+#     dat_tmp = if(any(class(fits[[i]])=='dsem')){fits[[i]]$tmb_inputs$data$y_tj
+#     }else{fits[[i]]$input$dat$y_tj}
+#
+#     Y_long <- dat_tmp %>% as.data.frame() %>%
+#       mutate(Year= TS_years,version=fits[[i]]$version) %>%
+#       pivot_longer(cols=-c(Year,version),values_to = 'data')
+#
+#     XY_long <- X_long %>% full_join(Y_long,join_by(Year, version, name)) %>%
+#       pivot_longer(cols=c(data,estimates),names_to='value_type')
+#
+#     tmp <- tmp %>%
+#       bind_rows(XY_long)
+#
+#   }
+#
+#   tmp %>%
+#     ggplot(aes(x=Year,))
+#
+# }
+
+#--------------------------------------------------------------------#
 
 
+#Improvements to think of :
 
+#' Perform a simulation analysis
+#' @param
+#'
+#' @return
+#' @export
+#'
+#'
+#'
+
+# fit_assess_dsem = fit_assess_dsem_DAG1_sd0.1
+# fit_assess_dsem_DAG1_sd0.1$path <-'source'
+# fit_assess_dsem$path <-'source'
+# fit_assess_dsem_DAG1_sd0.1$input$path <-'source'
+# # input_int_dsem4simu$path <-'source'
+# sem=sem_DAG1
+# #
+# trysimu2 <- simulate_AssessDsem(sem=sem_DAG1,fit_assess_dsem =fit_assess_dsem_DAG1_sd0.1,
+#                     family= family <- rep('normal',ncol(ESPdata_DAG1_rec)),nsims = 1)
+
+# get_std(fits=re_fit_assess_dsem) %>%
+#   filter(name %in%c('Espawnbio','mean_log_recruit','recruit','log_recruit','beta_z'))
+
+
+'simulate_AssessDsem' <- function(sem, #ESPdata -> not needed?
+                                  fit_assess_dsem,
+                                  nsims=2,
+                                  family,
+                                  dsem_sim_control=list(resimulate_gmrf=TRUE,variance='none',ignoreNAs=TRUE)){
+
+  start_time <- Sys.time()
+
+  re_fit_assess_dsem <- list()
+  ### Simulation step 1: fit + simulate external dsem ---------
+
+  # built objects we need for a dsem fit
+  ext_dsem_data <- fit_assess_dsem$input$dat$y_tj
+  ext_dsem_data[1:nrow(ext_dsem_data),1] <- fit_assess_dsem$sd %>% filter(name =='x_tj') %>%
+    filter(year<(fit_assess_dsem$input$dat$styr+nrow(ext_dsem_data))) %>% pull(est)
+
+  ext_dsem_par = fit_assess_dsem$input$pars[c("beta_z","lnsigma_j","mu_j","delta0_j","x_tj")]
+  ext_dsem_map = fit_assess_dsem$input$map[c("x_tj","lnsigma_j","mu_j")]
+  ext_dsem_map$mu_j <- factor(c(1:ncol(ext_dsem_data)))
+
+  # ext_dsem_family = fit_assess_dsem$input$dat$familycode_j
+  ext_dsem_control=dsem_control(use_REML=F, run_model=TRUE,quiet=TRUE,
+                                getJointPrecision = TRUE,
+                                parameters=ext_dsem_par,
+                                map=ext_dsem_map)
+  # fit
+  fit_ext_dsem4sim = dsem( sem=sem, tsdata=ext_dsem_data, family=family, control=ext_dsem_control)
+
+
+  #simulate with ext dsem
+  sim_ext_dsem <- simulate(object = fit_ext_dsem4sim,nsim=nsims,seed=120,
+                           variance = dsem_sim_control$variance,
+                           resimulate_gmrf = dsem_sim_control$resimulate_gmrf,
+                           ignoreNAs = dsem_sim_control$ignoreNAs,
+                           full = TRUE)
+
+  for(i in 1:nsims){
+    ### Simulation step 2: build a intDsem obj + simulate -----------
+
+    #create a new input object
+    input_int_dsem4simu <- fit_assess_dsem$input
+
+    # stick X_tj from ext_dsem simulation
+    input_int_dsem4simu$pars$x_tj <- sim_ext_dsem[[i]]$z_tj
+
+    #fix something to avoid NAs
+    input_int_dsem4simu$dat$multN_fsh[1] <- 1
+
+    #build obj
+    # input_int_dsem4simu$path <-'source'
+    fit_int_dsem4simu <- fit_pk(input=input_int_dsem4simu,newtonsteps=1,
+                                do.fit=FALSE,filename = NULL,
+                                getsd=FALSE,save.sdrep = FALSE)
+
+    #simulate with it
+    sim_int_dsem <- fit_int_dsem4simu$simulate()
+
+    ### Simulation step 3: new intDsem obj + fit -------
+
+    #create another input object
+    input_int_dsem4fit <- fit_assess_dsem$input
+    input_int_dsem4fit$version <- i
+
+    #stack the simulated data in this input object
+    for (x in 1:length( input_int_dsem4fit$dat)){
+      for(z in 1:length(sim_int_dsem)){
+        if(names(input_int_dsem4fit$dat)[x]==names(sim_int_dsem)[z]){
+          input_int_dsem4fit$dat[x] <-  sim_int_dsem[z]}
+      }
+    }
+    # add the simulated y_tj from ext dsem simulation
+    input_int_dsem4fit$dat$y_tj <- sim_ext_dsem[[i]]$y_tj
+    input_int_dsem4fit$dat$y_tj[,1]<- NA #set NAs for the recdev col
+
+    #fit
+    # input_int_dsem4fit$path <-'source'
+    re_fit_assess_dsem[[i]] <- suppressMessages(fit_pk(input=input_int_dsem4fit,newtonsteps=2,
+                                                       do.fit=TRUE,filename = NULL,
+                                                       control=list(trace=0),verbose=FALSE,
+                                                       save.sdrep = FALSE,getsd=TRUE))#can probably be turn to false
+
+    re_fit_assess_dsem[[i]]$simu_int_dsem <-  sim_int_dsem
+    re_fit_assess_dsem[[i]]$simu_ext_dsem <- sim_ext_dsem[[i]]
+    # re_fit_assess_dsem[[i]]$simu <- c(sim_ext_dsem,sim_int_dsem)
+  }
+
+  end_time <- Sys.time()
+  print(end_time - start_time)
+  return(re_fit_assess_dsem)
 }
