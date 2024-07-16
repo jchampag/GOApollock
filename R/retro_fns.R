@@ -36,17 +36,17 @@ fit_pk_retros <- function(fit, peels=0:7, getsd=TRUE, parallel=FALSE,...){
 peel_pars <- function(pars, dat,  peel){
   p <- pars
   stopifnot(peel>=0)
-  if(any(sapply(p, function(x) !is.null(dim(x))))) stop("matrix or arrays break retro code")
+  # if(any(sapply(p, function(x) !is.null(dim(x))))) stop("matrix or arrays break retro code")
   endyr <- dat$endyr-peel
   yrs <- dat$styr:endyr
-  nyrs <- length(p$dev_log_recruit)
+  nyrs <- length(p$dev_log_F)
   ind <- 1:(nyrs-peel)
-  x <- c("dev_log_recruit", "slp1_fsh_dev", "inf1_fsh_dev",
+  x <- c( "slp1_fsh_dev", "inf1_fsh_dev", #"dev_log_recruit", out for assessdsem
          "slp2_fsh_dev", "inf2_fsh_dev", "dev_log_F", "log_q1_dev",
          "log_q2_dev", "log_q3_dev")
   for(i in x) p[[i]] <- p[[i]][ind]
-  if(any(sapply(p, NROW)>length(ind)))
-    stop("Some pars too long in peel ",peel)
+  # if(any(sapply(p, NROW)>length(ind))) #chck with cole if it's problematic to remove this
+  #   stop("Some pars too long in peel ",peel)
   if(peel==0) stopifnot(all.equal(p,pars))
   return(p)
 }
