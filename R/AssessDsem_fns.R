@@ -495,7 +495,7 @@
 #--------------------------------------------------------------------#
 
 
-#Improvements to think of :
+#Improvements to think of : get rid of the family arg -> can be deduced from fit
 
 #' Perform a simulation analysis
 #' @param
@@ -524,10 +524,12 @@
                                   fit_assess_dsem,
                                   nsims=2,
                                   family,
-                                  dsem_sim_control=list(resimulate_gmrf=TRUE,variance='none',ignoreNAs=TRUE)){
+                                  dsem_sim_control=list(resimulate_gmrf=TRUE,variance='none',ignoreNAs=TRUE),
+                                  simverbose=TRUE,
+                                  fit_sim=TRUE,seed=5){
 
   start_time <- Sys.time()
-
+  set.seed(seed)
   re_fit_assess_dsem <- list()
   ### Simulation step 1: fit + simulate external dsem ---------
 
@@ -550,7 +552,7 @@
 
 
   #simulate with ext dsem
-  sim_ext_dsem <- simulate(object = fit_ext_dsem4sim,nsim=nsims,#seed=120,
+  sim_ext_dsem <- simulate(object = fit_ext_dsem4sim,nsim=nsims,seed=seed,
                            variance = dsem_sim_control$variance,
                            resimulate_gmrf = dsem_sim_control$resimulate_gmrf,
                            ignoreNAs = dsem_sim_control$ignoreNAs,
@@ -597,17 +599,24 @@
     #fit
     # input_int_dsem4fit$path <-'source'
     re_fit_assess_dsem[[i]] <- suppressMessages(fit_pk(input=input_int_dsem4fit,newtonsteps=2,
-                                                       do.fit=TRUE,filename = NULL,
+                                                       do.fit=fit_sim,filename = NULL,
                                                        control=list(trace=0),verbose=FALSE,
                                                        save.sdrep = FALSE,getsd=TRUE))#can probably be turn to false
 
+    #add sim data
     re_fit_assess_dsem[[i]]$simu_int_dsem <-  sim_int_dsem
     re_fit_assess_dsem[[i]]$simu_ext_dsem <- sim_ext_dsem[[i]]
     # re_fit_assess_dsem[[i]]$simu <- c(sim_ext_dsem,sim_int_dsem)
+    #if the model has not be fitted, add manually some slot usefull
+    if(!fit_sim){
+    re_fit_assess_dsem[[i]]$input <- input_int_dsem4fit;
+    re_fit_assess_dsem[[i]]$modfile<-input_int_dsem4fit$modfile;
+    re_fit_assess_dsem[[i]]$path<-input_int_dsem4fit$path
+    re_fit_assess_dsem[[i]]$version <- fit_assess_dsem$version}
   }
 
   end_time <- Sys.time()
-  print(end_time - start_time)
+  if(simverbose){print(end_time - start_time)}
   return(re_fit_assess_dsem)
 }
 
@@ -690,6 +699,52 @@
 }
 
 
+# repretros <- do_skill_test(reps=1:20,sem=sem_DAG1,fit=fit,peels=0:10,ny_proj=3,env_data='idealistic',parallel=TRUE)
+
+# 'do_skill_test' <- function(reps=1:20,sem,fit,peels=0:10,ny_proj=3,env_data='idealistic',parallel=TRUE){
+#   if(class(fit)[1]!='pkfit')
+#     stop("fit argument is not a fitted model")
+#   if(parallel){
+#     message("Preparing parallel session..")
+#     if(!require(snowfall))
+#       stop("snowfall package required for parallel execution")
+#     sfInit(parallel=TRUE, cpus=parallel::detectCores()-1)
+#     sfLibrary(GOApollock);sfLibrary(dsem)
+#     sfExport(c('retro_proj_analysis_AssessDsem','fit_retro_proj_AssessDsem','simulate_AssessDsem'))
+#     rep_retros <- sfLapply(reps, function(i) retro_proj_analysis_AssessDsem(reps=i,sem=sem,fit=fit,peels=peels,ny_proj = ny_proj,env_data = env_data))
+#     sfStop()
+#   } else {
+#     rep_retros <- lapply(reps, function(i) retro_proj_analysis_AssessDsem(reps=i,sem=sem,fit=fit,peels=peels,ny_proj = ny_proj,env_data = env_data))
+#   }
+#   return(rep_retros)
+# }
+
+
+
+'SIMretro_proj_analysis_AssessDsem' <- function(reps=1,sem,fit,peels=0:2,ny_proj=3,env_data='idealistic'){
+  #start_time <- Sys.time()
+
+  if(env_data != 'real'){ # need to run a simulation (1 for all the peels)
+    seed = reps
+    sim <- suppressMessages(simulate_AssessDsem(sem=sem,fit_assess_dsem =fit,family= family <- rep('normal',ncol(ESPdata_DAG1_rec)),
+                                                nsims = 1,fit_sim=FALSE,simverbose = FALSE,seed=seed))}
+
+  retros <- sim
+
+  # add simulated x_tj in the retros
+  # sim_ext_dsem[[1]]$  sim[[1]]$sd %>% filter(name%in%c('recruit','recruit_proj'))
+  for(p in peels){
+    retros[[p+1]]$reps = reps
+    retros[[p+1]]$Rtrue <-c(sim[[1]]$simu_int_dsem$recruit,sim[[1]]$simu_int_dsem$recruit_proj)}#[(fit$input$dat$endyr-fit$input$dat$styr+1-p)]}
+
+
+  end_time <- Sys.time()
+  print(end_time - start_time)
+
+  return(retros)
+}
+
+
 #--------------------------------------------------------------------#
 
 #Improvements to think of : add parallelization capabilities? (interest?)
@@ -699,9 +754,78 @@
 #'
 #' @export
 
-'retro_proj_analysis_AssessDsem' <- function(fit,peels=0:2,ny_proj=3,env_data='real'){
+# fit = fit_assess_dsem_DAG1_sd0.1
+# fit$path <-'source'
+# fit$input$path <-'source'
+# retros2 <- retro_proj_analysis_AssessDsem(sem=sem_DAG1noRlink,
+#                                fit=fit,peels=0:10,ny_proj = 3,env_data = 'idealistic')
+# retros <- retro_proj_analysis_AssessDsem(sem=sem_DAG1,
+#                                           fit=fit,peels=0:1,ny_proj = 3,env_data = 'idealistic')
+
+'retro_proj_analysis_AssessDsem' <- function(reps=1,sem,fit,peels=0:2,ny_proj=3,env_data='idealistic'){
   start_time <- Sys.time()
-  retros <- lapply(peels, function(i) fit_retro_proj_AssessDsem(fit_assess_dsem=fit, peel=i,ny_proj=ny_proj,env_data=env_data))
+
+  if(env_data != 'real'){ # need to run a simulation (1 for all the peels)
+    seed = reps
+    sim <- suppressMessages(simulate_AssessDsem(sem=sem,fit_assess_dsem =fit,family= family <- rep('normal',ncol(ESPdata_DAG1_rec)),
+                        nsims = 1,fit_sim=FALSE,simverbose = FALSE,seed=seed,
+                        dsem_sim_control=list(resimulate_gmrf=TRUE,variance='none',
+                                              ignoreNAs = if(env_data=='realistic'){FALSE}else{TRUE})))
+
+    #sim[[1]]$input$dat$y_tj
+
+
+
+    # get a dsem run# gy_tjet a dsem run
+    ## need data for rec dev
+    # dat_dsem4sim <- fit$input$dat$y_tj
+    # dat_dsem4sim[1:(nrow(dat_dsem4sim)-1),1] <- fit$sd %>% filter(name =='x_tj') %>%
+    #   filter(year<=(fit$input$dat$endyr)) %>% pull(est)
+    #
+    # ## first a null dsem fit
+    # ### need a control
+    # control4_dsem <- dsem_control(run_model=FALSE,use_REML=FALSE,quiet=TRUE)##parameters=new_pars_dsem, map=new_map_dsem,
+    #
+    # ### null fit
+    # fit_dsem_4simu_null <- dsem( sem=sem, tsdata=dat_dsem4sim,
+    #                         family=names(fit_assess_dsem$input$dat$familycode_j), control=control4_dsem)
+    #
+    # ## second a real one
+    # ### needs to fix the sd estimation
+    # # if(any(names(fit_assess_dsem$input$dat$familycode_j)=='normal')){ #needs to fix the sd parameter estimation
+    # new_pars_dsem <- fit_dsem_4simu_null$tmb_inputs$parameters
+    # new_pars_dsem$lnsigma_j <- fit$input$pars$lnsigma_j
+    #
+    # new_map_dsem = fit_dsem_4simu_null$tmb_inputs$map
+    # new_map_dsem$lnsigma_j <- fit$input$map$lnsigma_j
+    #
+    # ### new control
+    # control4sim_dsem <- dsem_control(quiet=TRUE,run_model=TRUE,use_REML=FALSE,
+    #                                  parameters=new_pars_dsem, map=new_map_dsem)
+    #
+    # ###fit this model
+    # fit_dsem_4simu <- dsem( sem=sem, tsdata=dat_dsem4sim, family=names(fit$input$dat$familycode_j),
+    #                         control=control4sim_dsem)
+    #
+    # # simulate based on it
+    # sim_ext_dsem <- simulate(object = fit_ext_dsem4sim,nsim=1,resimulate_gmrf = TRUE,#variance = 'none'
+    #                          ignoreNAs = if(env_data=='realistic'){FALSE}else{TRUE},
+    #                          full = TRUE)
+    #
+    # # Stick y_tj back in fit data
+    # fit$input$dat$y_tj <- ts(sim_ext_dsem[[1]]$y_tj%>% as.data.frame() %>% mutate(recdevs=NA))
+  }
+
+  retros <- lapply(peels, function(i) fit_retro_proj_AssessDsem(sem=sem,fit_assess_dsem=sim[[1]], peel=i,ny_proj=ny_proj,
+                                                                env_data=env_data,reps=reps))
+
+  # add simulated x_tj in the retros
+  # sim_ext_dsem[[1]]$  sim[[1]]$sd %>% filter(name%in%c('recruit','recruit_proj'))
+  for(p in peels){
+    retros[[p+1]]$reps = reps
+    retros[[p+1]]$Rtrue <-c(sim[[1]]$simu_int_dsem$recruit,sim[[1]]$simu_int_dsem$recruit_proj)}#[(fit$input$dat$endyr-fit$input$dat$styr+1-p)]}
+
+
   end_time <- Sys.time()
   print(end_time - start_time)
 
@@ -712,36 +836,37 @@
 #-------------------------------------------------------------------------------#
 
 
-#Improvements to think of : detail cases for which all family are not normal + if you want to change the controls
+#Improvements to think of : detail cases for which all family are not normal + if you want to change the controls + more elegant way to not pass dsem dat/par/map in cole's functions
 
 #' Internal wraper: Fit 1 extDsem models with peeled data set + project based on it
 #'
 #' @export
 
 
-'fit_retro_proj_AssessDsem' <- function(fit_assess_dsem,peel,ny_proj=3,env_data='real'){
+'fit_retro_proj_AssessDsem' <- function(sem,fit_assess_dsem,peel,ny_proj=3,env_data='real',reps=1){
 
   stopifnot(peel>=0)
 
   ## peel assessment data -----
   control_assess <- list(eval.max=10000, iter.max=10000, trace=0)
 
-  dat2_assess <- peel_data(dat=fit_assess_dsem$obj$env$data, peel)
-  attributes(dat2_assess) <- attributes(fit_assess_dsem$obj$env$data)
-  attributes(dat2_assess)$check.passed <- NULL
-  pars2_assess <- peel_pars(pars=fit_assess_dsem$obj$env$parList(), dat=dat2_assess, peel)
-  map2_assess <- peel_map(map=fit_assess_dsem$obj$env$map, pars2_assess)
+  dat2_assess <- peel_data(dat=fit_assess_dsem$input$dat[-c(105:109)], peel)#peel_data(dat=fit_assess_dsem$obj$env$data, peel)#
+  # attributes(dat2_assess) <- attributes(fit_assess_dsem$obj$env$data)
+  # attributes(dat2_assess)$check.passed <- NULL
+  pars2_assess <- peel_pars(pars=fit_assess_dsem$input$pars[-c(40:44)], dat=dat2_assess, peel)#peel_pars(pars=fit_assess_dsem$obj$env$parList(), dat=dat2_assess, peel)#
+  map2_assess <- peel_map(map=fit_assess_dsem$input$map[-c(18:20)], pars2_assess)#peel_map(map=fit_assess_dsem$obj$env$map, pars2_assess)#
   if(dat2_assess$endyr<2013){
     warning("No survey 6 data so mapping off log_q6")
     map2_assess$log_q6 <- factor(NA)
   }
-  input2_assess <- list(version=paste0('peel',peel), path=fit_assess_dsem$path,
+  input2_assess <- list(version=paste0(fit_assess_dsem$version,'_rep',reps,'_peel',peel), path=fit_assess_dsem$path,
                  modfile=fit_assess_dsem$modfile,
                  dat=dat2_assess, pars=pars2_assess, map=map2_assess, random=fit_assess_dsem$input$random)
 
   ## peel dsem data -----
   dat_dsem <- fit_assess_dsem$input$dat$y_tj
-  ny <- nrow(dat_dsem)-1 #here is for proj year in this particuliar dataset -> TO REMOVE LATER!!
+  #here we want to account the nb of proj year already included in y_tj
+  ny <- nrow(dat_dsem)-length(fit_assess_dsem$input$dat$Ftarget)
 
   # trim y_tj + add number of year for projection
   dat2_dsem <- dat_dsem[1:(ny-peel),] %>% as.data.frame() %>% add_row(recdevs=rep(NA,ny_proj))
@@ -757,7 +882,7 @@
                              quiet=TRUE, run_model=FALSE,
                              # gmrf_parameterization=fit$internal$control$gmrf_parameterization,
                              use_REML=FALSE,#fit$internal$control$use_REML,
-                             profile=fit$internal$control$profile,
+                             # profile=fit$internal$control$profile,
                              # getJointPrecision=fit$internal$control$getJointPrecision,
                              # extra_convergence_checks=fit$internal$control$extra_convergence_checks
                              )
@@ -766,49 +891,49 @@
   # fit_null <- dsem( sem=fit$internal$sem, tsdata=ts(dat2_dsem), family=fit$internal$family, control=control1) #other option simpler but requires an internal slot in fit_assessdsem
 
   # if you don't want to use the actual y_tj data you have to simulate new ones -> requires a dsem fit
-  if(env_data != 'real'){
-    new_map_dsem = fit_dsem_null$tmb_inputs$map
-    new_pars_dsem <- fit_dsem_null$tmb_inputs$parameters
-
-    if(any(names(fit_assess_dsem$input$dat$familycode_j)=='normal')){ #needs to fix the sd parameter estimation
-      new_map_dsem$lnsigma_j <- factor(rep(NA, length=length(new_map_dsem$lnsigma_j)))
-      new_pars_dsem$lnsigma_j <- rep(log(0.1), length=length(new_pars_dsem$lnsigma_j))}
-
-    #build another control object for this dsem fit
-    control2_dsem <- dsem_control(
-                               # nlminb_loops = fit$internal$control$nlminb_loops,
-                               # newton_loops=fit$internal$control$newton_loops,
-                               trace=0,
-                               # eval.max = fit$internal$control$eval.max,
-                               # iter.max = fit$internal$control$iter.max,
-                               # getsd=fit$internal$control$getsd,
-                               quiet=TRUE, run_model=TRUE,
-                               # gmrf_parameterization=fit$internal$control$gmrf_parameterization,
-                               use_REML=FALSE,#fit$internal$control$use_REML,
-                               # profile=fit$internal$control$profile,
-                               parameters=new_pars_dsem,
-                               map=new_map_dsem,
-                               # getJointPrecision=fit$internal$control$getJointPrecision,
-                               # extra_convergence_checks=fit$internal$control$extra_convergence_checks
-                               )
-
-    #needs data for rec dev
-    dat_dsem4sim <- dat2_dsem
-    dat_dsem4sim[1:nrow(dat_dsem4sim),1] <- fit_assess_dsem$sd %>% filter(name =='x_tj') %>%
-      filter(year<(fit_assess_dsem$input$dat$styr+nrow(dat_dsem4sim))) %>% pull(est)
-
-    #fit this model
-    fit_dsem_4simu <- dsem( sem=sem, tsdata=ts(dat_dsem4sim), family=names(fit_assess_dsem$input$dat$familycode_j), control=control2_dsem)
-
-    #simulate based on it
-    sim_ext_dsem <- simulate(object = fit_ext_dsem4sim,nsim=1,variance = 'none', resimulate_gmrf = FALSE,
-                               ignoreNAs = if(env_data=='realistic'){FALSE}else{TRUE},
-                               full = FALSE)
-
-    #arrange y_tj for our purpose (trim year out of peel)
-    fit_dsem_null$tmb_inputs$dat$y_tj <- ts(sim_ext_dsem[[1]][1:(ny-peel),] %>% as.data.frame() %>% add_row(recdevs=rep(NA,ny_proj)))
-    # fit_dsem_null$tmb_inputs$dat$y_tj[((ny-peel):ny),] <- NA
-    }
+  # if(env_data != 'real'){
+  #   new_map_dsem = fit_dsem_null$tmb_inputs$map
+  #   new_pars_dsem <- fit_dsem_null$tmb_inputs$parameters
+  #
+  #   if(any(names(fit_assess_dsem$input$dat$familycode_j)=='normal')){ #needs to fix the sd parameter estimation
+  #     new_map_dsem$lnsigma_j <- factor(rep(NA, length=length(new_map_dsem$lnsigma_j)))
+  #     new_pars_dsem$lnsigma_j <- rep(log(0.1), length=length(new_pars_dsem$lnsigma_j))}
+  #
+  #   #build another control object for this dsem fit
+  #   control2_dsem <- dsem_control(
+  #                              # nlminb_loops = fit$internal$control$nlminb_loops,
+  #                              # newton_loops=fit$internal$control$newton_loops,
+  #                              trace=0,
+  #                              # eval.max = fit$internal$control$eval.max,
+  #                              # iter.max = fit$internal$control$iter.max,
+  #                              # getsd=fit$internal$control$getsd,
+  #                              quiet=TRUE, run_model=TRUE,
+  #                              # gmrf_parameterization=fit$internal$control$gmrf_parameterization,
+  #                              use_REML=FALSE,#fit$internal$control$use_REML,
+  #                              # profile=fit$internal$control$profile,
+  #                              parameters=new_pars_dsem,
+  #                              map=new_map_dsem,
+  #                              # getJointPrecision=fit$internal$control$getJointPrecision,
+  #                              # extra_convergence_checks=fit$internal$control$extra_convergence_checks
+  #                              )
+  #
+  #   #needs data for rec dev
+  #   dat_dsem4sim <- dat2_dsem
+  #   dat_dsem4sim[1:nrow(dat_dsem4sim),1] <- fit_assess_dsem$sd %>% filter(name =='x_tj') %>%
+  #     filter(year<(fit_assess_dsem$input$dat$styr+nrow(dat_dsem4sim))) %>% pull(est)
+  #
+  #   #fit this model
+  #   fit_dsem_4simu <- dsem( sem=sem, tsdata=ts(dat_dsem4sim), family=names(fit_assess_dsem$input$dat$familycode_j), control=control2_dsem)
+  #
+  #   #simulate based on it
+  #   sim_ext_dsem <- simulate(object = fit_ext_dsem4sim,nsim=1,variance = 'none', resimulate_gmrf = FALSE,
+  #                              ignoreNAs = if(env_data=='realistic'){FALSE}else{TRUE},
+  #                              full = FALSE)
+  #
+  #   #arrange y_tj for our purpose (trim year out of peel)
+  #   fit_dsem_null$tmb_inputs$dat$y_tj <- ts(sim_ext_dsem[[1]][1:(ny-peel),] %>% as.data.frame() %>% add_row(recdevs=rep(NA,ny_proj)))
+  #   # fit_dsem_null$tmb_inputs$dat$y_tj[((ny-peel):ny),] <- NA
+  #   }
 
   ## gather everything -----
   input2_assessDsem <- input2_assess
@@ -846,7 +971,8 @@
   # input2_assessDsem$random <-  fit_dsem_null$tmb_inputs$random#c(input2_assess$random, fit_dsem_null$tmb_inputs$random)
   ## fit peel ------
   message("Starting optimization for peel=",peel)
-  fit <- suppressWarnings(fit_pk(input=input2_assessDsem, getsd=TRUE, control=control_assess))
+  fit2 <- suppressWarnings(fit_pk(input=input2_assessDsem, getsd=TRUE, control=control_assess))
+  # fit3 <- (fit_pk(input=input2_assessDsem, getsd=TRUE, control=control_assess))#,newtonsteps = 0))
 
-  return(fit)
+  return(fit2)
 }
