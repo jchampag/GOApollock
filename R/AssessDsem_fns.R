@@ -270,8 +270,10 @@
   for(i in seq_along(fits)){
 
     if(any(class(fits[[i]])== 'assessdsem')){
+      #have to grab the nb of beta_z corresponding to sigmaR
+      id <-  which(as_fitted_DAG_assessdsem(fits[[i]],out.type = 'summary',which.link = 'all')$name=='sigmaR')
       tmp <- tmp %>%
-        bind_rows(fits[[i]]$sd %>%  filter(name=='beta_z') %>% filter(year==1970))
+        bind_rows(fits[[i]]$sd %>%  filter(name=='beta_z') %>% filter(year==(1969+id)))
 
     }else{
       # is this one necessary? if yes have to think to get same str than fit$sd + give a version name
@@ -819,8 +821,8 @@
   retros <- lapply(peels, function(i) fit_retro_proj_AssessDsem(sem=sem,fit_assess_dsem=sim[[1]], peel=i,ny_proj=ny_proj,
                                                                 env_data=env_data,reps=reps))
 
-  # add simulated x_tj in the retros
-  # sim_ext_dsem[[1]]$  sim[[1]]$sd %>% filter(name%in%c('recruit','recruit_proj'))
+
+  # add true recruitment values in every peel ---------------
   for(p in peels){
     retros[[p+1]]$reps = reps
     retros[[p+1]]$Rtrue <-c(sim[[1]]$simu_int_dsem$recruit,sim[[1]]$simu_int_dsem$recruit_proj)}#[(fit$input$dat$endyr-fit$input$dat$styr+1-p)]}
