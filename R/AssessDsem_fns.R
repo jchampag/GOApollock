@@ -537,21 +537,21 @@
 
   # built objects we need for a dsem fit
   ext_dsem_data <- fit_assess_dsem$input$dat$y_tj
-  ext_dsem_data[1:nrow(ext_dsem_data),1] <- fit_assess_dsem$sd %>% filter(name =='x_tj') %>%
-    filter(year<(fit_assess_dsem$input$dat$styr+nrow(ext_dsem_data))) %>% pull(est)
+  # ext_dsem_data[1:nrow(ext_dsem_data),1] <- fit_assess_dsem$sd %>% filter(name =='x_tj') %>%
 
-  ext_dsem_par = fit_assess_dsem$input$pars[c("beta_z","lnsigma_j","mu_j","delta0_j","x_tj")]
+  ext_dsem_par = fit_assess_dsem$parList[c("beta_z","lnsigma_j","mu_j","delta0_j","x_tj")]
   ext_dsem_map = fit_assess_dsem$input$map[c("x_tj","lnsigma_j","mu_j")]
+  if(!is.null(fit_assess_dsem$input$map[c("beta_z")])){ext_dsem_map$beta_z <-fit_assess_dsem$input$map$beta_z }
   ext_dsem_map$mu_j <- factor(c(1:ncol(ext_dsem_data)))
 
   # ext_dsem_family = fit_assess_dsem$input$dat$familycode_j
-  ext_dsem_control=dsem_control(use_REML=F, run_model=TRUE,quiet=TRUE,
+  ext_dsem_control=dsem_control(use_REML=F, run_model=FALSE,quiet=TRUE,
                                 getJointPrecision = TRUE,
                                 parameters=ext_dsem_par,
                                 map=ext_dsem_map)
   # fit
   fit_ext_dsem4sim = dsem( sem=sem, tsdata=ext_dsem_data, family=family, control=ext_dsem_control)
-
+  class(fit_ext_dsem4sim) <- 'dsem'
 
   #simulate with ext dsem
   sim_ext_dsem <- simulate(object = fit_ext_dsem4sim,nsim=nsims,seed=seed,
