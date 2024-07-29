@@ -1325,8 +1325,19 @@ Type objective_function<Type>::operator() ()
     loglik(22) = dnorm(log_q2_mean, log(Type(0.85)), Type(0.1), true);
     // these broad priors stabilize estimation, particularly for
     // retros, and imply uniform 1 selex for this survey
+    // descendingslope  
+    loglik(23) += dnorm(log_slp2_srv1, Type(0.0),Type(2.0), true);
+    loglik(23) += dnorm(log_slp2_srv2, Type(0.0),Type(2.0), true);
     loglik(23) += dnorm(log_slp2_srv6, Type(0.0),Type(2.0), true);
+    loglik(23) += dnorm(log_slp2_fsh_mean, Type(0.0),Type(2.0), true); //for fisheries
+    //ascending break point
+    loglik(23) += dnorm(inf1_srv2, Type(0.0),Type(3.0), true);
+    loglik(23) += dnorm(inf1_srv3, Type(0.0),Type(3.0), true);
+    //descending break pint
+    loglik(23) += dnorm(inf2_srv1, Type(10.0),Type(3.0), true);
+    loglik(23) += dnorm(inf2_srv2, Type(10.0),Type(3.0), true);
     loglik(23) += dnorm(inf2_srv6, Type(10.0),Type(3.0), true);
+    loglik(23) += dnorm(inf2_fsh_mean, Type(10.0),Type(3.0), true); //for fisheries
     objfun = -sum(loglik);
     objfun +=jnll_dsem; // add DSEM likelihood
 
@@ -1448,7 +1459,7 @@ Type objective_function<Type>::operator() ()
   REPORT(Esrvlenp6);
   REPORT(slctfsh_proj);
   REPORT(recruit_proj);
-  REPORT(dev_log_recruit_proj);
+  ADREPORT(dev_log_recruit_proj);
   REPORT(log_recr_proj);
   REPORT(sigmasq_recr);
   REPORT(N_proj);
@@ -1486,11 +1497,11 @@ Type objective_function<Type>::operator() ()
   ADREPORT(slctsrv1);
   ADREPORT(slctsrv2);
   ADREPORT(slctsrv3);
-  ADREPORT(slctsrv1_logit);
-  ADREPORT(slctsrv2_logit);
-  ADREPORT(slctsrv3_logit);
-  ADREPORT(slctsrv6_logit);
-  ADREPORT(slctfsh_logit);
+  //ADREPORT(slctsrv1_logit);
+  //ADREPORT(slctsrv2_logit);
+  //ADREPORT(slctsrv3_logit);
+  //ADREPORT(slctsrv6_logit);
+  //ADREPORT(slctfsh_logit);
   ADREPORT(Espawnbio);
   ADREPORT(Esumbio);
   ADREPORT(Espawnbio_log);
