@@ -788,14 +788,14 @@
 
     ## Fit with the simulated data ------
     retros2 <- lapply(peels, function(i) fit_retro_proj_AssessDsem(sem=sem,fit_assess_dsem=sim[[1]],
-                                                                  peel=i,ny_proj=ny_proj,
-                                                                  env_data=env_data,reps=reps))
+                                                                  peel=i,ny_proj=ny_proj,reps=reps))
     ## Add true recruitment values in every peel -----
     # /!\ 2 fits nested in each attribute of the list
     for(p in peels){
       retros2[[p+1]][[1]]$reps <- retros2[[p+1]][[2]]$reps <- reps
       retros2[[p+1]][[1]]$Rtrue <-c(sim[[1]]$simu_int_dsem$recruit,sim[[1]]$simu_int_dsem$recruit_proj)#[(fit$input$dat$endyr-fit$input$dat$styr+1-p)]}
-      retros2[[p+1]][[2]]$Rtrue <- retros2[[p+1]][[1]]$Rtrue}
+      retros2[[p+1]][[2]]$Rtrue <- retros2[[p+1]][[1]]$Rtrue
+      retros2[[p+1]][[1]]$env_data <- retros2[[p+1]][[2]]$env_data <- env_data}
 
     ## Unlist the nested list
     retros <- unlist(retros2,recursive = FALSE)
@@ -820,7 +820,7 @@
 #' @export
 
 
-'fit_retro_proj_AssessDsem' <- function(sem,fit_assess_dsem,peel,ny_proj=3,env_data='real',reps=1){
+'fit_retro_proj_AssessDsem' <- function(sem,fit_assess_dsem,peel,ny_proj=3,reps=1){
 
   stopifnot(peel>=0)
 
