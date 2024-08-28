@@ -123,7 +123,7 @@
 
 #--------------------------------------------------------------------------#
 
-#Improvements to think of : none for now
+#Improvements to think of : none for now + made some adjustement for matrix output for plotting purpose, does it need to be a special case?
 
 #' Return objects able to display estimated internal and external relation between variables
 #' based on \code{\link{as_fitted_DAG}}()
@@ -172,6 +172,8 @@
     if(which.link!= 'all'){coefs = coefs[which(coefs[, 6] !=coefs[, 7] ),-c(4,5) ];return(coefs)}
     return(coefs[,-c(4,5)])
   }else{
+    coefs = coefs %>% filter(direction==1,first!=second)
+    vars = c(coefs %>% pull(first),coefs %>% pull(second)) %>% unique()
 
     out = list(coef = array(0, dim = rep(length(vars), 2), dimnames = list(vars,
                                                                              vars)))
