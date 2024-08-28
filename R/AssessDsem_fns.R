@@ -32,7 +32,8 @@
                              ny_proj=15,
                              newtonsteps=1,
                              Assess_recdevs= NULL, #if ExtDsem it it requiered to have it
-                             save_fit = TRUE
+                             save_fit = TRUE,
+                             Rdsem=TRUE
 ){
   #some warnings
   if(is.null(Assess_recdevs)& fit_type=="ExtDsem"){print('cannot fit without recdev estimates')}
@@ -96,6 +97,15 @@
     input_assessDsem$map$mu_j <- factor(c(NA,2:ncol(ESPdata))) #
     input_assessDsem$pars$mu_j[1] <- 0 #already done by dsem, usefull?
     input_assessDsem$map$sigmaR <- NULL ## took out of model
+
+    if(!Rdsem){
+      ids <-  as.data.frame(fit_dsem$sem_full)
+      id_Rlink <- which(ids$first!=ids$second & ids$second=='recdevs')
+      input_assessDsem$map$beta_z <- 1:length(input_assessDsem$pars$beta_z )
+      input_assessDsem$map$beta_z[id_Rlink] <- NA
+      input_assessDsem$map$beta_z <- as.factor(input_assessDsem$map$beta_z)
+      input_assessDsem$pars$beta_z[id_Rlink] <- 0
+    }
 
     fit_assessDsem <- fit_pk(input=input_assessDsem,
                              getsd=TRUE, newtonsteps=newtonsteps, do.fit=1,
