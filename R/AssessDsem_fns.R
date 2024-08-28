@@ -783,7 +783,7 @@
   if(env_data == 'real'){
     retros <- lapply(peels, function(i) fit_retro_proj_AssessDsem(sem=sem,fit_assess_dsem=fit,
                                                                 peel=i,ny_proj=ny_proj,
-                                                                env_data=env_data,reps=reps))
+                                                                reps=reps))
 
   # Simulate data if needed  (1 for all the peels) ---------
   }else{
