@@ -33,7 +33,8 @@
                              newtonsteps=1,
                              Assess_recdevs= NULL, #if ExtDsem it it requiered to have it
                              save_fit = TRUE,
-                             Rdsem=TRUE
+                             Rdsem=TRUE,
+                             ...
 ){
   #some warnings
   if(is.null(Assess_recdevs)& fit_type=="ExtDsem"){print('cannot fit without recdev estimates')}
@@ -59,7 +60,7 @@
       fit_assess <- fit_pk(input=input_assess,
                            getsd=TRUE, newtonsteps=newtonsteps,
                            save.sdrep = TRUE,
-                           filename = if(save_fit){paste0(fit_type,fit_name,'.RDS')}else{NULL})
+                           filename = if(save_fit){paste0(fit_type,fit_name,'.RDS')}else{NULL},...)
 
       out <- fit_assess
     }
@@ -110,7 +111,7 @@
     fit_assessDsem <- fit_pk(input=input_assessDsem,
                              getsd=TRUE, newtonsteps=newtonsteps, do.fit=1,
                              save.sdrep = TRUE,
-                             filename = if(save_fit){paste0(fit_type,fit_name,'.RDS')}else{NULL})
+                             filename = if(save_fit){paste0(fit_type,fit_name,'.RDS')}else{NULL},...)
 
     fit_assessDsem$sem_full <- fit_dsem$sem_full
     class(fit_assessDsem) <- c(class(fit_assessDsem),'assessdsem')
