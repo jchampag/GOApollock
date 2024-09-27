@@ -465,47 +465,134 @@
 
 #Improvements to think of :
 
-#' Return a plot showing the estimated imput time series
+#' Return a plot showing the estimated input time series
 #' @param fits a list of fits to compare
 #'
 #' @return A plot
 #' @export
 
 # fits=list(fit_ext_dsem_proj_dropidx,fit_assess_dsem_proj_dropidx)
-# TS_years = 1970:(2023+15)
-#
-# 'TS_plot' <- function(fits,TS_years){
-#
-#   tmp <- NULL
-#
-#   for(i in seq_along(fits)){
-#
-#     #get & format x_tj
-#     par_tmp = fits[[i]]$obj$env$parList()
-#     X_long <- par_tmp$x_tj %>% as.data.frame() %>%
-#       mutate(Year= TS_years,version=fits[[i]]$version) %>%
-#       pivot_longer(cols=-c(Year,version),values_to = 'estimates')
-#
-#     #get & format y_tj
-#     dat_tmp = if(any(class(fits[[i]])=='dsem')){fits[[i]]$tmb_inputs$data$y_tj
-#     }else{fits[[i]]$input$dat$y_tj}
-#
-#     Y_long <- dat_tmp %>% as.data.frame() %>%
-#       mutate(Year= TS_years,version=fits[[i]]$version) %>%
-#       pivot_longer(cols=-c(Year,version),values_to = 'data')
-#
-#     XY_long <- X_long %>% full_join(Y_long,join_by(Year, version, name)) %>%
-#       pivot_longer(cols=c(data,estimates),names_to='value_type')
-#
-#     tmp <- tmp %>%
-#       bind_rows(XY_long)
-#
-#   }
-#
-#   tmp %>%
-#     ggplot(aes(x=Year,))
-#
-# }
+
+
+'TS_plot' <- function(fits,TS_years,ribbon=TRUE){
+
+  tmp <- NULL
+  for(i in seq_along(fits)){
+
+    TS_years = fits[[i]]$input$dat$styr:(fits[[i]]$input$dat$endyr+length(fits[[i]]$input$dat$Ftarget))
+
+    #get & format x_tj
+    # if(ribbon){
+      if(nrow(fits[[i]]$sd %>% filter(name=='x_tj'))/ncol(fits[[i]]$input$dat$y_tj)==length(TS_years)){
+        #easy case when you have the full x_tj matrix reported
+          X_long <- fits[[i]]$sd %>% filter(name=='x_tj') %>%
+                        mutate(name=rep(dimnames(fits[[i]]$input$dat$y_tj)[[2]],each=length(TS_years)),
+                               year=rep(TS_years,ncol(fits[[i]]$input$dat$y_tj))) %>%
+                        select(name,year,est,se,lwr,upr,version)
+
+      }else{
+        #less easy case
+
+        #have to find out which TS has missing value and create a vector accordingly
+        ESP_names <- ESP_year <- NULL
+        for(j in 1:ncol(fits[[i]]$input$dat$y_tj)){
+          ESP_tmp <- rep(dimnames(fits[[i]]$input$dat$y_tj)[[2]][j],length(which(is.na(fits[[i]]$input$dat$y_tj[,j]))))
+          ESP_names <- c(ESP_names,ESP_tmp)
+          # length(ESP_names)== nrow(fits[[i]]$sd %>% filter(name=='x_tj')) #check
+
+          #same trick for years
+          ESP_tmp2 <- TS_years[which(is.na(fits[[i]]$input$dat$y_tj[,j]))]
+          ESP_year <- c(ESP_year,ESP_tmp2)
+          # length(ESP_year)== nrow(fits[[i]]$sd %>% filter(name=='x_tj')) #check
+          }
+
+        X_long <- fits[[i]]$sd %>% filter(name=='x_tj') %>%
+          mutate(name=ESP_names,year=ESP_year) %>%
+          select(name,year,est,se,lwr,upr,version)
+
+    }
+      # else{
+      # X_long <- fits[[i]]$parList$x_tj %>% as.data.frame() %>%
+      # mutate(year= TS_years,version=fits[[i]]$version) %>%
+      # pivot_longer(cols=-c(year,version),values_to = 'est')
+      # }
+
+
+    #get & format y_tj
+    dat_tmp = if(any(class(fits[[i]])=='dsem')){fits[[i]]$tmb_inputs$data$y_tj
+    }else{fits[[i]]$input$dat$y_tj}
+
+    Y_long <- dat_tmp %>% as.data.frame() %>%
+      mutate(year= TS_years,version=fits[[i]]$version) %>%
+      pivot_longer(cols=-c(year,version),values_to = 'data')
+
+    XY_long <- X_long %>% full_join(Y_long,join_by(year, version, name)) %>%
+      mutate(est=ifelse(is.na(est),data,est))
+    # dim(X_long);dim(Y_long);dim(XY_long)
+
+    tmp <- tmp %>%
+      bind_rows(XY_long)
+
+  }
+
+  plotTS <- tmp %>%
+    mutate(name=factor(name,levels=c('recdevs','Spr_Larvae_Shelikof','Sum_OffYOY_Shelikof',
+                                     'Sum_NearYOY_Kodiak','Sum_Euph_Kodiak','Sum_LCopepod_Shelikof',
+                                     'Sum_Juv_EuphDiet','Sum_OffYOY_Cond',
+                                     'Fal_Adult_Cond_Fishery','Spr_SST','Wind_NS'))) %>%
+    ggplot()+geom_point(aes(year,data),col='black')+
+    geom_line(aes(year,est,col=version,group=version))+
+    facet_wrap(~name)+
+    theme(legend.position = 'bottom')+
+    labs(y='Time series',x='Year')
+
+  if(ribbon){
+    if(any(names(tmp)=='lwr')){
+      plotTS <- plotTS + geom_ribbon(aes(year,ymin=lwr,ymax=upr,fill=version,group=version),alpha=0.2)}
+    else(print('There are no stde estimates'))}
+
+
+
+  return(plotTS)
+
+  ## For the 1 y ahead analysis only
+  # tmp %>%
+  #   mutate(model = ifelse(substr(version,1,2)=='op','R_iid','R_Dsem'),
+  #          peel=stringr::str_split_fixed(version,pattern='_',n=5)[,5]) %>%
+  #
+  #   mutate(name=factor(name,levels=c('recdevs','Spr_Larvae_Shelikof','Sum_OffYOY_Shelikof',
+  #                                    'Sum_NearYOY_Kodiak','Sum_Euph_Kodiak','Sum_LCopepod_Shelikof',
+  #                                    'Sum_Juv_EuphDiet','Sum_OffYOY_Cond',
+  #                                    'Fal_Adult_Cond_Fishery','Spr_SST','Wind_NS'))) %>%
+  #   filter(!name %in%c ('Sum_Euph_Kodiak','Sum_LCopepod_Shelikof','Sum_NearYOY_Kodiak','Sum_Juv_EuphDiet')) %>%
+  #   # filter(name %in%c ('recdevs','Spr_Larvae_Shelikof','Sum_OffYOY_Shelikof')) %>%
+  #   ggplot()+geom_point(aes(Year,data),col='black')+
+  #   geom_line(aes(Year,estimates,col=peel,group=peel))+
+  #   facet_grid(model~name)+
+  #   theme(legend.position = 'bottom')+
+  #   labs(y='Time series')
+  #
+  #
+  # tmp %>%
+  #   mutate(model = ifelse(substr(version,1,2)=='op','R_iid','R_Dsem'),
+  #          peel=stringr::str_split_fixed(version,pattern='_',n=5)[,5]) %>%
+  #   mutate(peel=factor(peel,levels=c('peel10','peel9','peel8','peel7','peel6',
+  #                                    'peel5','peel4',
+  #                                    'peel3','peel2','peel1','peel0'))) %>%
+  #
+  #   mutate(name=factor(name,levels=c('recdevs','Spr_Larvae_Shelikof','Sum_OffYOY_Shelikof',
+  #                                    'Sum_NearYOY_Kodiak','Sum_Euph_Kodiak','Sum_LCopepod_Shelikof',
+  #                                    'Sum_Juv_EuphDiet','Sum_OffYOY_Cond',
+  #                                    'Fal_Adult_Cond_Fishery','Spr_SST','Wind_NS'))) %>%
+  #   filter(!name %in%c ('Sum_Euph_Kodiak','Sum_LCopepod_Shelikof','Sum_NearYOY_Kodiak','Sum_Juv_EuphDiet')) %>%
+  #   filter(name %in%c ('recdevs','Spr_Larvae_Shelikof','Sum_OffYOY_Shelikof')) %>%
+  #   ggplot()+geom_point(aes(Year,data),col='black')+
+  #   geom_line(aes(Year,estimates,col=model,group=model))+
+  #   facet_grid(peel~name)+#,scale='free_y'
+  #   theme(legend.position = 'bottom')+
+  #   labs(y='Time series')
+  #
+}
 
 #--------------------------------------------------------------------#
 
