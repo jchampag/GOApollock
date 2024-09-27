@@ -325,11 +325,22 @@
 #' @export
 
 'compute_var_red' <- function(new_fit,ref_fit){
-  ref <- ref_fit$sd %>% filter(name=='sigmaR')%>% pull(est)
-  new <- new_fit$sd %>% filter(name=='beta_z') %>% filter(year==1970) %>% pull(est)
+
+  if(any(class(ref_fit)=='dsem')){stop("Method not applicable to dsem fit")}
+  if(any(class(new_fit)=='dsem')){stop("Method not applicable to dsem fit")}
+
+  if(!any(class(ref_fit)=='assessdsem')){ref <- ref_fit$parList$sigmaR
+  }else{
+    idRsig <- ref_fit$sem_full %>% as.data.frame() %>% filter(name=='sigmaR') %>% pull(parameter)
+    ref <- ref_fit$parList$beta_z[idRsig]}
+
+  if(!any(class(new_fit)=='assessdsem')){new <- new_fit$parList$sigmaR
+  }else{
+    idRsig2 <- new_fit$sem_full %>% as.data.frame() %>% filter(name=='sigmaR') %>% pull(parameter)
+    new  <- new_fit$parList$beta_z[idRsig2]}
 
   red = ((new^2)-(ref^2))/(ref^2)
-  return(red)
+  return(as.numeric(red))
 }
 
 #----------------------------------------------------------------------#
