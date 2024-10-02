@@ -130,7 +130,7 @@ fit_pk <- function(input, getsd=TRUE, newtonsteps=1,
   fit <- list(version=input$version, path=input$path,
               modfile=input$modfile, rep=rep, opt=opt, sd=std,
               obj=obj, parList=parList, input=input)
-  if(save.sdrep) fit <- c(fit,sdrep=sdrep)
+  if(save.sdrep) fit$sdrep <- sdrep#fit <- c(fit,sdrep=sdrep)
   class(fit) <- c('pkfit', 'list')
   print(fit)
   if(!is.null(filename)) {
