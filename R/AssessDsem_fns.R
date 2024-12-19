@@ -495,7 +495,7 @@
     ggplot(aes(x=path,y=Estimate,ymin=lwr,ymax=upr,col=model))+
     geom_pointrange(position=position_dodge(width=1)) +
     facet_wrap(~param)+
-    geom_hline(yintercept = 0)+
+    geom_hline(yintercept = 0)+    geom_hline(yintercept = -1)+    geom_hline(yintercept = 1)+
     ylim(-interval,interval)+
     coord_flip()+theme(legend.position='bottom')
 
