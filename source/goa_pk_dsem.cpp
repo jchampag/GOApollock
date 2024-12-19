@@ -566,6 +566,7 @@ Type objective_function<Type>::operator() ()
   Eigen::SparseMatrix<Type> Linv2_kk(n_k, n_k);
   Linv2_kk = I_kk - Rho_kk;
   Q_kk = Linv2_kk.transpose() * Vinv2_kk * Linv2_kk;
+  //REPORT(Linv2_kk);
 
   // Calculate effect of initial condition -- SPARSE version
   vector<Type> delta_k( n_k );
@@ -681,7 +682,59 @@ Type objective_function<Type>::operator() ()
   vector<Type> xtj0 = x_tj.matrix().col(0);
   dev_log_recruit= xtj0.segment(0,endyr-1970+1); //x_tj.matrix().col(0);
   //mean_log_recruit = mu_j(0);
-    
+  
+  // Compute total effect matrix
+  // SPARSE WAY
+  //Eigen::SparseMatrix<Type> I_kk_bis( n_k, n_k );
+  //I_kk_bis.setIdentity();
+
+  //Eigen::SparseMatrix<Type> IminusRho_kk_bis( n_k, n_k ); 
+  //IminusRho_kk_bis.setZero();
+  //IminusRho_kk_bis = I_kk_bis - Rho_kk;
+
+  //matrix<Type> TE_kk( n_k, n_k );
+  //TE_kk.setZero();
+  //TE_kk =  invertSparseMatrix( IminusRho_kk_bis );
+  
+  //REPORT(TE_kk);
+  //REPORT(IminusRho_kk_bis);
+
+  // NOT SPARSE
+  matrix<Type>I_kk_bis_nsp( n_k, n_k );
+  I_kk_bis_nsp.setIdentity();
+
+  matrix<Type>IminusRho_kk_bis_nsp( n_k, n_k );
+  IminusRho_kk_bis_nsp.setZero();
+  IminusRho_kk_bis_nsp = I_kk_bis_nsp - Rho_kk;
+
+  matrix<Type> TE_kk_nsp( n_k, n_k );
+  TE_kk_nsp.setZero();
+  TE_kk_nsp=atomic::matinv(IminusRho_kk_bis_nsp);
+
+  REPORT(TE_kk_nsp);
+  //REPORT(IminusRho_kk_bis_nsp);
+
+  // Extract effect on recdevs
+  vector<Type> eff;
+  eff = TE_kk_nsp.row(n_t-1);
+  ADREPORT(eff);
+
+  // Extract effect on recdevs
+  //matrix<Type> effect(n_j);
+  // eff(n_k);
+  // eff2(n_t);
+
+  //for (int j=0;j<n_j;i++) {
+    // extract the colums of interest (1st colum of each j-sub-matrix)
+  //  vector<Type> eff = TE_kk.col(n_t); //+1 ou pas?
+
+    // take only the chunk of TE of variable on recdev
+  //  vector<Type> eff2 = eff.segment(0,n_t);
+
+    // add this to matrix of effect
+    //effect.col(j) = eff2;
+  //}
+
   // Reporting
   //REPORT( V_kk );
   REPORT( Q_kk );
@@ -698,7 +751,9 @@ Type objective_function<Type>::operator() ()
   SIMULATE{
     REPORT( y_tj );
   }
-
+  
+  //ADREPORT(eff);
+  //ADREPORT(eff2);
   // -- end of DSEM
   //// ------------------------------------------------------------
 
