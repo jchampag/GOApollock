@@ -1094,4 +1094,226 @@
 #' @export
 #' @param out.type 'df','peelplot','barplot','RMSEdiff','RMSEdiffpeelplot'
 
+# retros <- retrAD_real_DAG8simple_2SSTdarrow_Rdsem
+# Rmatching <- c(fit_assess_dsem_DAG8_2SST_darrow$rep$recruit,fit_assess_dsem_DAG8_2SST_darrow$rep$recruit_proj)
+# Runmatching <- c(fit_assess_dsem_DAG8_2SST_darrow_noRlink$rep$recruit,fit_assess_dsem_DAG8_2SST_darrow_noRlink$rep$recruit_proj)
+#
+# RMSE_predskill(retros=retrAD_real_DAG8simple_2SSTdarrow_Rdsem,nb_peel = 10,out.type = 'RMSEdiff',
+#                Rmatching=c(fit_assess_dsem_DAG8_2SST_darrow$rep$recruit,fit_assess_dsem_DAG8_2SST_darrow$rep$recruit_proj),
+#                Runmatching = c(fit_assess_dsem_DAG8_2SST_darrow_noRlink$rep$recruit,fit_assess_dsem_DAG8_2SST_darrow_noRlink$rep$recruit_proj)
+#                )
+#
+# RMSE_predskill(retros=skilltest_real_DAG8simple_Rdsem,nb_peel =10,out.type = 'RMSEdiff',
+#                Rmatching=c(fit_assess_dsem_DAG8noupperCondnoNearYOY$rep$recruit,fit_assess_dsem_DAG8noupperCondnoNearYOY$rep$recruit_proj),
+#                Runmatching = c(fit_assess_dsem_DAG8noupperCondnoNearYOYnoRlink$rep$recruit,fit_assess_dsem_DAG8noupperCondnoNearYOYnoRlink$rep$recruit_proj)
+# )
+
+'RMSE_predskill_real' <- function(retros,Rmatching,Runmatching,nb_peel=5,out.type='RMSEdiff',
+                             RMSEtype='agg',env_data='real'){
+
+  # For real data #------
+  # if(env_data == 'real'){
+
+    ### Create SE df ####
+    if(is.null(Rmatching)|is.null(Runmatching)){stop('You need to provide R values for R_Dsem and R_iid')}
+
+    Rtrue_both <- data.frame(Year=retros[[1]]$input$dat$styr:(retros[[1]]$input$dat$endyr+length(retros[[1]]$input$dat$Ftarget)),
+                             'matching'=Rmatching,'unmatching'=Runmatching) %>%
+      pivot_longer(cols=-Year,values_to = 'Rtrue',names_to = 'EM') %>%
+      mutate(env_data=env_data, OM='Rdsem',rep=1)
+
+    RMSEdf <- get_std(retros) %>%
+      filter(name == 'log_recruit_proj' ) %>%
+      mutate_at(vars(est,upr,lwr),.funs=exp) %>%
+      # mutate(lwr=est-qnorm(0.975)*se,
+      #        upr=est+qnorm(0.975)*se)
+      mutate(env_data='real') %>%
+      mutate(EM=ifelse(substr(version,1,1)=='o','unmatching','matching'),
+             peel=substr(version,nchar(as.character(version))-4,nchar(as.character(version)))) %>%
+      mutate(peel=recode_factor(peel,'eel10'='peel10')) %>%
+      mutate(p=as.integer(substr(peel,5,6))) %>%
+      mutate(assess_year=retros[[1]]$input$dat$endyr-as.integer(substr(peel,5,6)))  %>%
+      mutate(Year = assess_year+year-(retros[[1]]$input$dat$styr-1)) %>%
+      mutate(lag=Year-assess_year) %>%
+      select(EM,env_data,assess_year,Year,est,se,version,peel,p,lag,upr,lwr) %>%
+
+      ## Add Rtrue
+      left_join(Rtrue_both,by = c('Year','EM','env_data')) %>% #View()
+
+      ## compute square error
+      mutate(SE=(est-Rtrue)^2) %>%
+
+      ## remove some lines which does not rely on proper data
+      filter(!(lag==1&peel=='peel0') ) %>%
+      filter(!(lag==2&peel%in%c('peel0','peel1'))) %>%
+      filter(!(lag==3&peel%in%c('peel0','peel1','peel2'))) %>%
+      filter(Year<retros[[1]]$input$dat$endyr) %>% #this estimate is not certain enough
+
+      #filter certain peels if required by args
+      filter(p<=nb_peel) %>%
+      # filter(!peel%in%c('peel10','peel9','peel8','peel7')) %>%
+      # another mutate for plot
+      mutate(lag=recode_factor(as.character(lag),'1'='1y_proj','2'='2y_proj','3'='3y_proj','4'='4y_proj',
+                               '5'='5y_proj'))
+
+      ## Summarize it if necessary ####
+      if(RMSEtype=='agg'){
+        RMSEdf <- RMSEdf %>%
+          ## summarise
+          group_by(EM,env_data,lag,OM) %>% #rep,OM
+          summarise(RMSE=sqrt(mean(SE)),n=length(SE))
+      }
+
+    ## plots ####
+    if(out.type=='RMSEdiffpeelplot'){
+      if(RMSEtype=='agg'){stop('Need disagregated RMSEtype for this plot')}
+    out <- RMSEdf %>%
+        pivot_wider(id_cols=c(env_data,lag,peel,OM,rep),values_from = SE,names_from=EM) %>%
+        mutate(diff=100*(matching-unmatching)/unmatching) %>%
+        mutate(peel=factor(peel,levels=c('peel10','peel9','peel8','peel7','peel6','peel5','peel4',
+                                         'peel3','peel2','pee9','peel0'))) %>%
+        ggplot(aes(x=peel,y=diff,fill=lag))+
+        # geom_line()+
+        geom_hline(yintercept = 0)+
+        geom_bar(stat='identity',position=position_dodge(preserve = "single"),col='black')+
+        coord_flip()+
+        facet_grid(OM~lag)+#,ncol=3
+        theme(axis.title = element_text(size=20),axis.text = element_text(size=15))+
+        theme(legend.position='none')+labs(y="Relative difference between R_Dsem and R_iid RMSE (%)",x='Number of year peeled back')
+    }
+
+    if(out.type=='RMSEdiff'){
+      if(RMSEtype=='agg'){
+        out <- RMSEdf %>%
+          pivot_wider(id_cols=c(env_data,lag,OM),values_from = RMSE,names_from=EM) %>%
+          mutate(diff=100*(matching-unmatching)/unmatching) %>%
+          select(OM,lag,diff)
+      }else{
+        out <- RMSEdf %>%
+          pivot_wider(id_cols=c(env_data,lag,OM,peel),values_from = SE,names_from=EM) %>%
+          mutate(diff=100*(matching-unmatching)/unmatching) %>%
+          select(OM,lag,diff)
+      }
+    }
+
+    if(out.type=='barplot'){
+      if(RMSEtype=='agg'){
+        out <- RMSEdf %>%
+          ggplot(aes(EM,RMSE,fill=EM))+
+          geom_bar(stat='identity',position=position_dodge())+coord_flip()+facet_wrap(~lag)+
+          theme(legend.position = 'none')+labs(title=paste0('RMSE for different year of projections and going back ',nb_peel,' years.'))
+        #geom_text(aes(rep,max(RMSE)+0.2,label=n,col=EM),size=2,position=position_jitterdodge())
+      }else{
+        out <- RMSEdf %>%
+          mutate(peel=factor(peel,levels=c('peel0','peel1','peel2','peel3','peel4','peel5','peel6',
+                                           'peel7','peel8','peel9','peel10'))) %>%
+          ggplot(aes(Year,SE,fill=EM,group=interaction(peel,EM)))+
+          geom_bar(stat='identity',position=position_dodge(preserve = "single"))+
+          theme(legend.position = 'bottom')+
+          facet_wrap(~peel,ncol=5,scale='free_x')
+      }
+    }
+
+    if(out.type=='peelplot'){
+      if(RMSEtype=='agg'){stop('Need disagregated RMSEtype for this plot')}
+      out <- RMSEdf %>%
+        ggplot(aes(Year,est,fill=peel,col=peel,group=interaction(peel,EM),ymin=lwr,ymax=upr))+#geom_point()+#
+        geom_line()+geom_ribbon(alpha=0.2)+#aes(lty=mod))+
+        facet_wrap(~EM,scale='free_y',ncol=1)+
+        geom_point(aes(Year,Rtrue),col='black')+
+        theme(legend.position='bottom')+
+        scale_x_continuous(limits = c(min(RMSEdf$Year), max(RMSEdf$Year)),
+                           breaks = seq(min(RMSEdf$Year),max(RMSEdf$Year),1))+
+        labs(y='Recruitment')
+    }
+
+    if(out.type=='df'){
+      if(RMSEtype=='agg'){out<- RMSEdf}else{out <- RMSEdf %>% select(-c(version,p))}#,upr,lwr
+    }
+
+
+  return(out)
+}
+
+
+'RMSE_predskill_id' <- function(retros,Rmatching,Runmatching,nb_peel=5,out.type='RMSEdiff',
+                                  RMSEtype='repnpeelagg',env_data='idealistic'){
+
+  # For idealistic data_env type #-------
+
+  ## Create SE df #####
+  Rtrue <- purrr::map_dfr(retros, function(x){
+    data.frame(Year=retros[[1]]$input$dat$styr:(retros[[1]]$input$dat$endyr+length(retros[[1]]$input$dat$Ftarget)),
+               Rtrue=x$Rtrue,
+               env_data=env_data,
+               version=rep(x$version,length(x$Rtrue)))})
+
+  RMSEdf <- get_std(retros) %>%
+    filter(name == 'log_recruit_proj' ) %>%
+    mutate_at(vars(est,upr,lwr),.funs=exp) %>%
+    # mutate(env_data=env_data) %>%
+    mutate(EM=ifelse(substr(version,1,1)=='o','unmatching','matching'),
+           peel=substr(version,nchar(as.character(version))-4,nchar(as.character(version)))) %>%
+    mutate(peel=recode_factor(peel,'eel10'='peel10'),
+           OM=ifelse(grepl(version,pattern='Riid'),'R_iid',"R_Dsem" ),
+           rep=ifelse(OM=='R_Dsem',
+                      unlist(as.matrix(stringr::str_split_fixed(version,pattern = '_',
+                                                                n=6))[,4]),
+                      unlist(as.matrix(stringr::str_split_fixed(version,pattern = '_',
+                                                                n=7))[,5]))) %>%
+    mutate(p=as.integer(substr(peel,5,6))) %>%
+    mutate(assess_year=retros[[1]]$input$dat$endyr-as.integer(substr(peel,5,6)))  %>%
+    mutate(Year = assess_year+year-(retros[[1]]$input$dat$styr-1)) %>%
+    mutate(lag=Year-assess_year) %>% #names()
+    select(-c(name,year2)) %>%
+
+    ## Add Rtrue
+    left_join(Rtrue,by = c('Year',"version")) %>% #View()
+
+    ## compute square error
+    mutate(SE=(est-Rtrue)^2) %>%
+
+    ## remove some lines which does not rely on proper data
+    filter(!(lag==1&peel=='peel0') ) %>%
+    filter(!(lag==2&peel%in%c('peel0','peel1'))) %>%
+    filter(!(lag==3&peel%in%c('peel0','peel1','peel2'))) %>%
+    filter(Year<retros[[1]]$input$dat$endyr) %>% #this estimate is not certain enough
+
+    #filter certain peels if required by args
+    filter(p<=nb_peel) %>%
+    # filter(!peel%in%c('peel10','peel9','peel8','peel7')) %>%
+    # another mutate for plot
+    mutate(lag=recode_factor(as.character(lag),'1'='1y_proj','2'='2y_proj','3'='3y_proj'))
+
+    ## level of agregation + plots/dfs #####
+    if(RMSEtype=='peelagg'){
+      RMSEdf <- RMSEdf %>%
+        ## summarise
+        group_by(EM,env_data,lag,OM,rep) %>%
+        summarise(RMSE=sqrt(mean(SE)),n=length(SE))
+
+      #if(out.type=='df'){
+      out<- RMSEdf#}else{stop('Not implemented yet')}
+    }
+    if(RMSEtype=='repagg'){
+      RMSEdf <- RMSEdf %>%
+        ## summarise
+        group_by(EM,env_data,lag,OM,peel) %>%
+        summarise(RMSE=sqrt(mean(SE)),n=length(SE))
+      #if(out.type=='df'){
+      out<- RMSEdf#}else{stop('Not implemented yet')}
+    }
+    if(RMSEtype=='repnpeelagg'){
+      RMSEdf <- RMSEdf %>%
+        ## summarise
+        group_by(EM,env_data,lag,OM) %>%
+        summarise(RMSE=sqrt(mean(SE)),n=length(SE))
+      #if(out.type=='df'){
+      out<- RMSEdf#}else{stop('Not implemented yet')}
+    }
+    if(RMSEtype=='dis'){
+      #if(out.type=='df'){
+      out <- RMSEdf %>% select(-c(version,p))#}else{stop('not implemented yet')}}
+    }
+  return(out)
 }
