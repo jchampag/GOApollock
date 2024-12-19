@@ -976,7 +976,8 @@
 #' @export
 
 
-'fit_retro_proj_AssessDsem' <- function(sem,fit_assess_dsem,peel,ny_proj=3,reps=1){
+'fit_retro_proj_AssessDsem' <- function(sem,fit_assess_dsem,peel,ny_proj=3,reps=1,
+                                        fit_w_and_wo_Rlink=TRUE){
 
   stopifnot(peel>=0)
 
@@ -1002,12 +1003,12 @@
   ny <- nrow(dat_dsem)-length(fit_assess_dsem$input$dat$Ftarget)
 
   # trim y_tj + add number of year for projection
-  dat2_dsem <- dat_dsem[1:(ny-peel),] %>% as.data.frame() %>% add_row(recdevs=rep(NA,ny_proj))
+  if(peel!=0){dat_dsem <- dat_dsem[1:(ny-peel),] %>% as.data.frame() %>% add_row(recdevs=rep(NA,ny_proj))}
 
   # create new control for the null fit
   control1_dsem <- dsem_control( trace=0,quiet=TRUE, run_model=FALSE, use_REML=FALSE)
   #make a null fit so all the parameters and map are trimmed to new y_tj dimensions
-  fit_dsem_null <- dsem(sem=sem, tsdata=ts(dat2_dsem), family=names(fit_assess_dsem$input$dat$familycode_j), control=control1_dsem)
+  fit_dsem_null <- dsem(sem=sem, tsdata=ts(dat_dsem), family=names(fit_assess_dsem$input$dat$familycode_j), control=control1_dsem)
 
   ## gather everything -----
   input2_assessDsem <- input2_assess
@@ -1018,26 +1019,29 @@
   input2_assessDsem$dat$RAM <- fit_dsem_null$tmb_inputs$dat$RAM
   input2_assessDsem$dat$RAMstart <- fit_dsem_null$tmb_inputs$dat$RAMstart
   input2_assessDsem$dat$familycode_j <- fit_dsem_null$tmb_inputs$dat$familycode_j
-  input2_assessDsem$dat$y_tj <- fit_dsem_null$tmb_inputs$dat$y_tj
+  input2_assessDsem$dat$y_tj <- if(peel==0){fit_assess_dsem$input$dat$y_tj}else{fit_dsem_null$tmb_inputs$dat$y_tj}
   input2_assessDsem$dat$y_tj[,1] <- NA
 
-  input2_assessDsem$dat$Ftarget <- rep(0.2630716,ny_proj) # set duration of projections
-  input2_assessDsem$dat$indxsurv_log_sd4 <- input2_assess$dat$indxsurv_log_sd4*5 #decrease weight of some indices
-  input2_assessDsem$dat$indxsurv_log_sd5 <- input2_assess$dat$indxsurv_log_sd5*5 #decrease weight of some indices
+  input2_assessDsem$dat$Ftarget <- rep(input2_assess$dat$Ftarget[1],ny_proj) # set duration of projections
+  # input2_assessDsem$dat$indxsurv_log_sd4 <- input2_assess$dat$indxsurv_log_sd4*5 #decrease weight of some indices
+  # input2_assessDsem$dat$indxsurv_log_sd5 <- input2_assess$dat$indxsurv_log_sd5*5 #decrease weight of some indices
+  input2_assessDsem$dat$indxsurv_log_sd4 <- rep(2.25,length(input2_assess$dat$indxsurv_log_sd4)) #decrease weight of some indices
+  input2_assessDsem$dat$indxsurv_log_sd5 <- rep(2.75,length(input2_assess$dat$indxsurv_log_sd5)) #decrease weight of some indices
 
   #pars
   # input2_assessDsem$pars <- c(input2_assess$pars, fit_dsem_null$tmb_inputs$parameters) #idem
   input2_assessDsem$pars$beta_z <- fit_assess_dsem$input$pars$beta_z#fit_dsem_null$tmb_inputs$parameters$beta_z
-  input2_assessDsem$pars$x_tj <- fit_dsem_null$tmb_inputs$parameters$x_tj
+  input2_assessDsem$pars$lnsigma_j <- fit_assess_dsem$input$pars$lnsigma_j#rep(log(0.1), length=length(fit_dsem_null$tmb_inputs$parameters$lnsigma_j)) #fixed value
   input2_assessDsem$pars$mu_j <- fit_dsem_null$tmb_inputs$parameters$mu_j
   input2_assessDsem$pars$delta0_j <- fit_dsem_null$tmb_inputs$parameters$delta0_j
-  input2_assessDsem$pars$lnsigma_j <- rep(log(0.1), length=length(fit_dsem_null$tmb_inputs$parameters$lnsigma_j)) #fixed value
+  input2_assessDsem$pars$x_tj <- fit_dsem_null$tmb_inputs$parameters$x_tj
+
 
   #map
   # input2_assessDsem$map <- c(input2_assess$map, fit_dsem_null$tmb_inputs$map) #same
   input2_assessDsem$map$x_tj <- fit_dsem_null$tmb_inputs$map$x_tj
-  input2_assessDsem$map$mu_j <- factor(c(NA,2:ncol(dat2_dsem))) # map off recdev mean since already a parameter
-  input2_assessDsem$map$lnsigma_j <-factor(rep(NA, length=length(fit_dsem_null$tmb_inputs$map$lnsigma_j))) #noT estimated
+  input2_assessDsem$map$lnsigma_j <- fit_assess_dsem$input$map$lnsigma_j#factor(rep(NA, length=length(fit_dsem_null$tmb_inputs$map$lnsigma_j))) #noT estimated
+  input2_assessDsem$map$mu_j <- fit_assess_dsem$input$map$mu_j#factor(c(NA,2:ncol(dat2_dsem))) # map off recdev mean since already a parameter
   if(!is.null(fit_assess_dsem$input$map[c("beta_z")])){input2_assessDsem$map$beta_z <-fit_assess_dsem$input$map$beta_z }
   input2_assessDsem$map$sigmaR <- NULL ## took out of model
 
@@ -1048,34 +1052,46 @@
   message("Starting optimization for peel=",peel)
   fit2 <- suppressWarnings(fit_pk(input=input2_assessDsem, getsd=TRUE, control=control_assess))
   # fit3 <- (fit_pk(input=input2_assessDsem, getsd=TRUE, control=control_assess))#,newtonsteps = 0))
+  out <- fit2
 
-  # Fit with the 'complementary' one - no Rlink if cond has, Rlink if cond doesn't have it ----------
-  input2_assessDsem3 <- input2_assessDsem
-  input2_assessDsem3$version <- paste0('oppRlink',input2_assessDsem3$version )
+  if(fit_w_and_wo_Rlink){
+    # Fit with the 'complementary' one - no Rlink if cond has, Rlink if cond doesn't have it ----------
+    input2_assessDsem3 <- input2_assessDsem
+    input2_assessDsem3$version <- paste0('oppRlink',input2_assessDsem3$version )
 
-  #find where the Rlink is
-  ids <-  as.data.frame(fit_dsem_null$sem_full)
-  id_Rlink <- which(ids$first!=ids$second & ids$second=='recdevs')
+    #find where the Rlink is
+    ids <-  as.data.frame(fit_dsem_null$sem_full)
+    id_Rlink <- which(ids$first!=ids$second & ids$second=='recdevs')
 
-  ### If it was a no Rlink fit ------
-  if(any(is.na(input2_assessDsem$map$beta_z))){
-    # re set the Rlink to be estimated
-    input2_assessDsem3$map$beta_z <- factor(1:length(input2_assessDsem3$map$beta_z))
-    input2_assessDsem3$pars$beta_z[id_Rlink] <- 0.01
+    ### If it was a no Rlink fit ------
+    if(any(is.na(input2_assessDsem$map$beta_z))){
+      # re set the Rlink to be estimated
+      input2_assessDsem3$map$beta_z <- factor(1:length(input2_assessDsem3$map$beta_z))
+      input2_assessDsem3$pars$beta_z[id_Rlink] <- 0.01
 
-  }else{ ### If it was a Rlink fit -------
-  # Set the par to 0 and map it out
-    input2_assessDsem3$map$beta_z <- 1:length(input2_assessDsem$pars$beta_z )
-    input2_assessDsem3$map$beta_z[id_Rlink] <- NA
-    input2_assessDsem3$map$beta_z <- as.factor(input2_assessDsem3$map$beta_z)
-    input2_assessDsem3$pars$beta_z[id_Rlink] <- 0   ## checl if that do the job!
-  }
+    }else{ ### If it was a Rlink fit -------
+    # Set the par to 0 and map it out
+      input2_assessDsem3$map$beta_z <- 1:length(input2_assessDsem$pars$beta_z )
+      input2_assessDsem3$map$beta_z[id_Rlink] <- NA
+      input2_assessDsem3$map$beta_z <- as.factor(input2_assessDsem3$map$beta_z)
+      input2_assessDsem3$pars$beta_z[id_Rlink] <- 0   ## checl if that do the job!
+    }
+
+    fit3 <- suppressWarnings(fit_pk(input=input2_assessDsem3, getsd=TRUE, control=control_assess))
+
+    out <- list(fit2,fit3)}
+
+  return(out)
+}
+
+#-------------------------------------------------------------------------------#
+
+
+#Improvements to think of :
 
 #'
 #'
 #' @export
 #' @param out.type 'df','peelplot','barplot','RMSEdiff','RMSEdiffpeelplot'
 
-  fits_w_wo_Rlink <- list(fit2,fit3)
-  return(fits_w_wo_Rlink)
 }
