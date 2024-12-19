@@ -159,22 +159,43 @@
                                      #fit_null_dsem=NULL,#/!\ this part could be simplified, to evaluate later
                                      lag = c(0,1), direction = c(1,2),
                                      what = "Estimate",which.link='causal',
-                                     out.type="matrix")
+                                     out.type="matrix",val='all')
 {
 
   if(any(class(fit)=='dsem')){ coefs = summary(fit);  vars = colnames(fit$tmb_inputs$data$y_tj)
   }else{#cannot use summary(fit) for a 'assessdsem' output, this part replace what it does
     if(all((class(fit)!='assessdsem'))){print('This function can only work with a dsem like output')}
+    if(is.null(fit$sdrep)){print('This function can only work with an output containing a sdrep slot')}
+    if(is.null(fit$sem_full)){print('This function can only work with an semfull slot')}
 
-    model = fit$sem_full#fit_null_dsem$sem_full #/!\ this part could be simplified, to evaluate later
-    ParHat <- list('beta_z'= fit$sd %>% filter(name== 'beta_z') %>% pull(est),
-                   'mu_j'= fit$sd %>% filter(name== 'mu_j') %>% pull(est))#,
+    model = fit$sem_full#/!\ this part could be simplified, to evaluate later
+    # ParHat <- fit$parList[c('beta_z','mu_j')]
+    # ParHat <- list('beta_z'= fit$sd %>% filter(name== 'beta_z') %>% pull(est),
+    #                'mu_j'= fit$sd %>% filter(name== 'mu_j') %>% pull(est))#,
 
-    coefs = data.frame( model, "Estimate"=c(NA,ParHat$beta_z)[ as.numeric(model[,'parameter'])+1 ] ) # parameter=0 outputs NA
-    coefs$Estimate = ifelse( is.na(coefs$Estimate), as.numeric(model[,4]), coefs$Estimate )
-    coefs = data.frame( coefs, "Std_Error"=fit$sd %>% filter(name== 'beta_z') %>% pull(se))
-    coefs = data.frame( coefs, "z_value"=coefs[,'Estimate']/coefs[,'Std_Error'] )
-    coefs = data.frame( coefs, "p_value"=pnorm(-abs(coefs[,'z_value'])) * 2 )
+    coefs = data.frame( model, "Estimate"= fit$parList$beta_z)
+    # coefs = data.frame( model, "Estimate"=c(NA,ParHat$beta_z)[ as.numeric(model[,'parameter'])+1 ] ) # parameter=0 outputs NA
+    # coefs$Estimate = ifelse( is.na(coefs$Estimate), as.numeric(model[,4]), coefs$Estimate )
+    # coefs$Std_Error = ifelse( coefs$Estimate==0,NA,NA)
+    # length(ParHat$beta_z)!= nrow(fit$sd %>% filter(name== 'beta_z'))
+    # unmapped_betaz <- fit$sem_full
+    # which(ParHat$beta_z==0)
+
+    # stde <- NULL
+    # for(i in 1:length(fit$parList$beta_z)){
+    #   if(any(i == which(is.na(fit$input$map$beta_z)))){stde[i] <- NA}
+    #   else{
+    #     ids <- fit$sem_full
+    #   }
+    #
+    # }
+    # coefs %>% left_join(fit$sd %>% filter(name=='beta_z') %>% select(c(est,se)),join_by(Estimate==est))
+    # coefs = data.frame( coefs, "Std_Error"=fit$sd %>% filter(name== 'beta_z') %>% pull(se))
+    if(val != 'est'){
+      coefs = data.frame( coefs, "Std_Error"=as.list(fit$sdrep,report = FALSE,what='Std. Error')$beta_z)
+
+      coefs = data.frame( coefs, "z_value"=coefs[,'Estimate']/coefs[,'Std_Error'] )
+      coefs = data.frame( coefs, "p_value"=pnorm(-abs(coefs[,'z_value'])) * 2 )}
     vars = colnames(fit$input$dat$y_tj)
 
   }
@@ -186,7 +207,11 @@
     if(which.link!= 'all'){coefs = coefs[which(coefs[, 6] !=coefs[, 7] ),-c(4,5) ];return(coefs)}
     return(coefs[,-c(4,5)])
   }else{
-    coefs = coefs %>% filter(direction==1,first!=second)
+    #in the matrix case, if pvalue are NA )because se is NA if not estimated) that's causing error
+    #tricking by putting a 0 (these arrow are not represented anyway so it does not matter)
+    # coefs$p_value[which(is.na(coefs$p_value))] <- 0
+    coefs = coefs %>% filter(first!=second) #filter(direction==1,first!=second) #you only want to represent causal link
+    coefs = coefs %>% filter(!(is.na(Std_Error)&Estimate==0)) # you don't want to represent link mapped and =0
     vars = c(coefs %>% pull(first),coefs %>% pull(second)) %>% unique()
 
     out = list(coef = array(0, dim = rep(length(vars), 2), dimnames = list(vars,
