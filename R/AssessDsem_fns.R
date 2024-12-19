@@ -29,6 +29,7 @@
                              ESPdata,
                              sem=sem,
                              sem_family =  rep('fixed', ncol(ESPdata)),
+                             family_sd = NULL,
                              ny_proj=15,
                              newtonsteps=1,
                              Assess_recdevs= NULL, #if ExtDsem it it requiered to have it
@@ -58,8 +59,8 @@
 
       #fit
       fit_assess <- fit_pk(input=input_assess,
-                           getsd=TRUE, newtonsteps=newtonsteps,
-                           save.sdrep = TRUE,
+                          newtonsteps=newtonsteps,
+                           # save.sdrep = TRUE, getsd=TRUE,
                            filename = if(save_fit){paste0(fit_type,fit_name,'.RDS')}else{NULL},...)
 
       out <- fit_assess
@@ -75,7 +76,7 @@
 
     # should it be done externally because then I'm loosing the possibility to change the control object...?
     control_dsem <- dsem_control(use_REML=FALSE, run_model=ifelse(fit_type == 'ExtDsem',TRUE,FALSE),
-                                 getsd=TRUE, trace=100, newton_loops=1)
+                                 getsd=TRUE, quiet=TRUE, trace=0, newton_loops=1)
 
     fit_dsem <- dsem(sem=sem, tsdata=ts(ESPdata), family=sem_family,
                      estimate_delta0=FALSE, control=control_dsem)
@@ -99,6 +100,16 @@
     input_assessDsem$pars$mu_j[1] <- 0 #already done by dsem, usefull?
     input_assessDsem$map$sigmaR <- NULL ## took out of model
 
+    if(any(sem_family=='normal')){
+      if(is.null(family_sd)){stop('You need to provide sd values for data observation error')} #making assumption it canot be estimated - which might not always be trye
+
+      #pars
+      if(length(family_sd)!=length(input_assessDsem$pars$lnsigma_j )){stop('Your family_sd needs to be of length ncol(ESPdata)+1')}
+      input_assessDsem$pars$lnsigma_j <- log(family_sd)
+
+      #map
+      input_assessDsem$map$lnsigma_j <- factor(rep(NA, length=length(input_assessDsem$pars$lnsigma_j)))
+    }
     if(!Rdsem){
       ids <-  as.data.frame(fit_dsem$sem_full)
       id_Rlink <- which(ids$first!=ids$second & ids$second=='recdevs')
@@ -109,9 +120,11 @@
     }
 
     fit_assessDsem <- fit_pk(input=input_assessDsem,
-                             getsd=TRUE, newtonsteps=newtonsteps, do.fit=1,
-                             save.sdrep = TRUE,
+                           newtonsteps=newtonsteps,
+                             # save.sdrep = TRUE,  getsd=TRUE, do.fit=TRUE,
                              filename = if(save_fit){paste0(fit_type,fit_name,'.RDS')}else{NULL},...)
+
+
 
     fit_assessDsem$sem_full <- fit_dsem$sem_full
     class(fit_assessDsem) <- c(class(fit_assessDsem),'assessdsem')
@@ -1026,7 +1039,10 @@
     input2_assessDsem3$pars$beta_z[id_Rlink] <- 0   ## checl if that do the job!
   }
 
-  fit3 <- suppressWarnings(fit_pk(input=input2_assessDsem3, getsd=TRUE, control=control_assess))
+#'
+#'
+#' @export
+#' @param out.type 'df','peelplot','barplot','RMSEdiff','RMSEdiffpeelplot'
 
   fits_w_wo_Rlink <- list(fit2,fit3)
   return(fits_w_wo_Rlink)
