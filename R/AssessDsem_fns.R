@@ -248,7 +248,8 @@
                        ny_proj=15,
                        mean_log_rec=0,
                        extDsem_name=NULL,
-                       points= FALSE)
+                       points= FALSE,
+                       nlines=NULL)
 
 
 {
@@ -286,6 +287,11 @@
           axis.title = element_text(size=12),axis.text = element_text(size=10))+
     scale_x_continuous(n.breaks = 10)+
     geom_vline(xintercept=2023)
+
+  if(is.null(nlines)){
+    if(length(fits)>2) plt <- plt + guides(color = guide_legend(nrow = 2))
+    if(length(fits)>6) plt <- plt + guides(color = guide_legend(nrow = 3))
+  }else{plt <- plt + guides(color = guide_legend(nrow = nlines))}
 
   if(points){return(plt+geom_point(aes(col=version)))}else{return(plt)}
 }
