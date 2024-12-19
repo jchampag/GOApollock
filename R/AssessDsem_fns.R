@@ -406,6 +406,7 @@
                           fit_label = c('fit1','fit2')){
 
   plt_link <- plt_pval <- list()
+  vnames <- NULL
   # tour =1
   for(i in seq_along(fits)){
 
@@ -414,7 +415,7 @@
                            text_size=4, show.legend=FALSE,
                            arrow = grid::arrow(type='closed', 18, grid::unit(10,'points')) ) +
       scale_x_continuous(expand = c(0.4, 0.1))
-
+  vnames <- c(vnames, fits[[i]]$version)
 
     # tour=tour+2
   }
@@ -437,7 +438,7 @@
   # ggarrange(for(i in seq_along(fits)){plt_link[[i]]},
   #                       labels = '',#fit_label,
   #                       ncol = length(fits), nrow = 2)
-  plt <- ggpubr::ggarrange(plotlist = plt_link, nrow=2,ncol = length(fits),labels=fit_label)
+  plt <- ggpubr::ggarrange(plotlist = plt_link, nrow=2,ncol = length(fits),labels=vnames)
   # cowplot::plot_grid(plt_link)
 
   return(plt)
