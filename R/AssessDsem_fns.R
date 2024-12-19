@@ -920,14 +920,15 @@
 # retros <- retro_proj_analysis_AssessDsem(sem=sem_DAG1,
 #                                           fit=fit,peels=0:1,ny_proj = 3,env_data = 'idealistic')
 
-'retro_proj_analysis_AssessDsem' <- function(reps=1,sem,fit,peels=0:2,ny_proj=3,env_data='idealistic'){
+'retro_proj_analysis_AssessDsem' <- function(reps=1,sem,fit,peels=0:2,ny_proj=3,
+                                             env_data='idealistic',fit_w_and_wo_Rlink,...){
   start_time <- Sys.time()
 
   # Fit with the exact same model if no simulation  ------------
   if(env_data == 'real'){
     retros <- lapply(peels, function(i) fit_retro_proj_AssessDsem(sem=sem,fit_assess_dsem=fit,
                                                                 peel=i,ny_proj=ny_proj,
-                                                                reps=reps))
+                                                                reps=reps,fit_w_and_wo_Rlink=fit_w_and_wo_Rlink))
 
   # Simulate data if needed  (1 for all the peels) ---------
   }else{
