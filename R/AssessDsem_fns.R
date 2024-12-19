@@ -113,7 +113,7 @@
     if(!Rdsem){
       ids <-  as.data.frame(fit_dsem$sem_full)
       id_Rlink <- which(ids$first!=ids$second & ids$second=='recdevs')
-      input_assessDsem$map$beta_z <- 1:length(input_assessDsem$pars$beta_z )
+      if(is.null(input_assessDsem$map$beta_z))input_assessDsem$map$beta_z <- 1:length(input_assessDsem$pars$beta_z )
       input_assessDsem$map$beta_z[id_Rlink] <- NA
       input_assessDsem$map$beta_z <- as.factor(input_assessDsem$map$beta_z)
       input_assessDsem$pars$beta_z[id_Rlink] <- 0
