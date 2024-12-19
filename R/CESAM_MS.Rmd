@@ -1,0 +1,449 @@
+---
+title: "CESAM_MS"
+author: "Juliette Champagnat"
+date: "2024-12-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# rm(list=ls())
+## devtools::install_github("James-Thorson-NOAA/dsem")
+## install.packages("dsem")
+library(TMB)
+library(dsem)
+library(ggplot2)
+library(dplyr)
+## devtools::install_github("afsc-assessments/GOApollock", ref='dev')
+# devtools::install_github("jchampag/GOApollock", ref='dev')
+library(GOApollock)
+library(readxl)
+# theme_set(theme_bw())
+library(phylopath)
+library(ggpubr)
+library(reshape)
+library(gridExtra)
+source("AssessDsem_fns.R")
+```
+
+
+# Data 
+
+
+## Load data 
+
+```{r}
+
+# ESP data
+datMS <- read_xlsx('../data/2023/goa_pollock_2023_dsem.xlsx', sheet=1, skip=3, na='NA') %>%
+  dplyr::rename('Heatwave'= 'Annual_Heatwave_GOA_Model',
+         'Spr_SST' = 'Spring_Temperature_Surface_WCGOA_Satellite',
+         'Sum_SBT' = 'Summer_Temperature_Bottom_GOA_Survey',
+         'Spr_WindDir_Kodiak' = 'Spring_Wind_Direction_Kodiak_Buoy',
+         'Spr_ChlA_Biomass' = 'Spring_Chlorophylla_Biomass_WCGOA_Satellite',
+         'Spr_ChlA_Peak' = 'Spring_Chlorophylla_Peak_WCGOA_Satellite',
+         'Spr_SCopepod_Shelikof' = 'Spring_Small_Copepod_Abundance_Shelikof_Survey',
+         'Sum_LCopepod_Shelikof' = 'Summer_Large_Copepod_Abundance_Shelikof_Survey',
+         'Sum_Euph_Kodiak' = 'Summer_Euphausiid_Abundance_Kodiak_Survey',
+         'Aucklet_ReproSuccess' = 'Annual_Auklet_Reproductive_Success_Chowiet_Survey',
+         'Spr_Larvae_Shelikof' = 'Spring_Pollock_CPUE_Larvae_Shelikof_Survey',
+         'Sum_OffYOY_Shelikof' = 'Summer_Pollock_CPUE_YOY_Shelikof_Survey',
+         'Sum_OffYOY_Cond_Shelikof' = 'Summer_Pollock_Condition_YOY_Shelikof_Survey',
+         'Sum_NearYOY_Kodiak' = 'Summer_Pollock_CPUE_YOY_Nearshore_Kodiak_Survey',
+         'Annual_Pollock_RelBiomass_Aiktak' = 'Annual_Pollock_Relative_Biomass_Aiktak_Survey',
+         'Sum_Pollock_MTconsumed_Age1_GOA_Model' = 'Summer_Pollock_MTconsumed_Age1_GOA_Model',
+         'Sum_Juv_EuphDiet' = 'Summer_Pollock_Euphausiid_Diet_Juvenile_GOA_Survey',
+         'Fal_Adult_Cond_Fishery' = 'Fall_Pollock_Condition_Adult_GOA_Fishery',
+         'Win_Adult_Cond_Survey' = 'Winter_Pollock_Condition_Adult_GOA_Survey',
+         'Sum_Pollock_Center_Gravity_Northeast_WCGOA_Model' = 'Summer_Pollock_Center_Gravity_Northeast_WCGOA_Model',
+         'Sum_Pollock_Area_Occupied_WCGOA_Model' = 'Summer_Pollock_Area_Occupied_WCGOA_Model',
+         'Arrowtooth_Biomass' = 'Annual_Arrowtooth_Biomass_GOA_Model',
+         'POP_Biomass' = 'Annual_Pacific_Ocean_Perch_Biomass_GOA_Model',
+         'Sablefish_Biomass' = 'Annual_Sablefish_Biomass_GOA_Model',
+         'AdultSeaLion' = 'Annual_Steller_Sea_Lion_Adult_GOA_Survey')# %>% names()
+
+
+# some data update
+Wind_NS <- read.csv('../Data/2023/ESP_2024_AMAA2_wind_NS_toAKFIN.csv') %>% filter(YEAR!=2024)
+CondYOY_up <- read.csv('../Data/2023/YOYConditionIndex_to2023.csv') %>% 
+  full_join(data.frame(yrs=1970:2023),by='yrs') %>% arrange(yrs)
+
+# a <- scale(read.csv('../Data/2023/ESP_2024_AMAA2_wind_NS_toAKFIN.csv') %>% filter(YEAR!=2024) %>% pull(DATA_VALUE))
+# b <- scale(read.csv('../Data/2023/ESP_2024_AMAA2_wind_NS_toAKFIN.csv') %>% pull(DATA_VALUE))
+
+
+
+```
+
+## Make dataset
+
+```{r}
+# set number of projected years
+ny_proj = 5
+
+var_of_interest <- c(1,3,9,10,12,13,14,15,18,19)#names(datMS)[var_of_interest]
+
+ESPdata_MS <- ESPdata_MS_plt <- bind_rows(data.frame(Year=c(1970:1976)), datMS) %>%
+  select(c(all_of(var_of_interest))) %>%# names()
+  
+  #add Wind and condition
+  
+  mutate(Sum_OffYOY_Cond_Shelikof = CondYOY_up$ymeans) %>% 
+  mutate(Wind_NS=c(rep(NA, 34),Wind_NS$DATA_VALUE)) %>%
+
+  # scale/log variables
+  mutate(across(.cols=c(Spr_Larvae_Shelikof,Sum_OffYOY_Shelikof,Sum_NearYOY_Kodiak),.fns=log)) %>% 
+  mutate(across(.fns =scale,.cols=-c(Year,Spr_Larvae_Shelikof,Sum_OffYOY_Shelikof,Sum_NearYOY_Kodiak))) %>% 
+
+  # add NAs for prediction years
+  add_row(Sum_OffYOY_Shelikof=rep(NA,ny_proj)) 
+  # mutate(Wind_NS=c(rep(NA, 34),Wind_NS$DATA_VALUE,rep(NA,4)))# %>%
+# dim(ESPdata_MS)
+
+
+## create another dataset wo year but recdev instead (the one used in the analysis)
+ESPdata_MS <- ESPdata_MS %>% select(-Year)
+  
+
+```
+
+# Model runs
+
+## iid
+
+```{r}
+
+sem_MS_iid = "
+  # link, lag, param_name, start_value
+
+  #internal data relation
+  Spr_SST -> Spr_SST,1,AR_SST
+  Wind_NS -> Wind_NS,1,AR_Wind
+  Sum_LCopepod_Shelikof -> Sum_LCopepod_Shelikof,1, AR_Cope
+  Sum_Euph_Kodiak -> Sum_Euph_Kodiak,1,AR_Euph
+  Spr_Larvae_Shelikof - > Spr_Larvae_Shelikof,1,AR_larvae
+  Sum_OffYOY_Cond_Shelikof -> Sum_OffYOY_Cond_Shelikof,1,AR_CondOffYOY
+  Sum_OffYOY_Shelikof -> Sum_OffYOY_Shelikof,1,AR_OffYOY
+  Sum_NearYOY_Kodiak -> Sum_NearYOY_Kodiak,1,AR_NearYOY
+  Sum_Juv_EuphDiet -> Sum_Juv_EuphDiet,1,AR_JuvEuphDiet
+  Fal_Adult_Cond_Fishery -> Fal_Adult_Cond_Fishery,1,AR_CondAd
+  recdevs <-> recdevs, 0, sigmaR, 1
+"
+
+fit_assess_dsem_MS_iid <- AssessDsem_fit(fit_type = "AssessDsem",
+                             fit_name = '_MS_iid' ,
+                             ESPdata=ESPdata_MS,
+                             sem=sem_MS_iid,
+                             sem_family =  rep('normal', ncol(ESPdata_MS)+1),
+                             family_sd = rep(0.1, ncol(ESPdata_MS)+1),
+                             ny_proj=ny_proj,
+                             Assess_recdevs= NULL,
+                             save_fit = FALSE,
+                             save.sdrep=TRUE)
+fit_assess_dsem_MS_iid$opt$AIC
+
+fit_assess_dsem_MS_MapMod$opt$AIC
+
+retrAD_real_MS_iid <- retro_proj_analysis_AssessDsem(sem=sem_MS_iid,
+                            fit=fit_assess_dsem_MS_iid,
+                            peels=0:2,env_data = 'real',ny_proj = 3)
+
+
+
+
+```
+
+
+## AR1
+
+```{r}
+
+# fit_assess_dsem_DAG8_2SST_darrow_RAR1
+
+
+sem_MS_AR1 = "
+  # link, lag, param_name, start_value
+
+  #internal data relation
+  Spr_SST -> Spr_SST,1,AR_SST
+  Wind_NS -> Wind_NS,1,AR_Wind
+  Sum_LCopepod_Shelikof -> Sum_LCopepod_Shelikof,1, AR_Cope
+  Sum_Euph_Kodiak -> Sum_Euph_Kodiak,1,AR_Euph
+  Spr_Larvae_Shelikof - > Spr_Larvae_Shelikof,1,AR_larvae
+  Sum_OffYOY_Cond_Shelikof -> Sum_OffYOY_Cond_Shelikof,1,AR_CondOffYOY
+  Sum_OffYOY_Shelikof -> Sum_OffYOY_Shelikof,1,AR_OffYOY
+  Sum_NearYOY_Kodiak -> Sum_NearYOY_Kodiak,1,AR_NearYOY
+  Sum_Juv_EuphDiet -> Sum_Juv_EuphDiet,1,AR_JuvEuphDiet
+  Fal_Adult_Cond_Fishery -> Fal_Adult_Cond_Fishery,1,AR_CondAd
+  recdevs -> recdevs, 1, AR_R, 1
+"
+
+fit_assess_dsem_MS_AR1 <- AssessDsem_fit(fit_type = "AssessDsem",
+                             fit_name = '_MS_AR1' ,
+                             ESPdata=ESPdata_MS,
+                             sem=sem_MS_AR1,
+                             sem_family =  rep('normal', ncol(ESPdata_MS)+1),
+                             family_sd = rep(0.1, ncol(ESPdata_MS)+1),
+                             ny_proj=ny_proj,
+                             Assess_recdevs= NULL,
+                             save_fit = FALSE,
+                             save.sdrep=TRUE)
+
+
+```
+
+
+
+## Regression
+
+```{r}
+
+# names(ESPdata_MS)
+
+sem_MS_regWind = "
+  # link, lag, param_name, start_value
+
+  #internal data relation
+  Spr_SST -> Spr_SST,1,AR_SST
+  Wind_NS -> Wind_NS,1,AR_Wind
+  Sum_LCopepod_Shelikof -> Sum_LCopepod_Shelikof,1, AR_Cope
+  Sum_Euph_Kodiak -> Sum_Euph_Kodiak,1,AR_Euph
+  Spr_Larvae_Shelikof - > Spr_Larvae_Shelikof,1,AR_larvae
+  Sum_OffYOY_Cond_Shelikof -> Sum_OffYOY_Cond_Shelikof,1,AR_CondOffYOY
+  Sum_OffYOY_Shelikof -> Sum_OffYOY_Shelikof,1,AR_OffYOY
+  Sum_NearYOY_Kodiak -> Sum_NearYOY_Kodiak,1,AR_NearYOY
+  Sum_Juv_EuphDiet -> Sum_Juv_EuphDiet,1,AR_JuvEuphDiet
+  Fal_Adult_Cond_Fishery -> Fal_Adult_Cond_Fishery,1,AR_CondAd
+  recdevs <-> recdevs, 0, sigmaR, 1
+
+  #causal relation
+  Wind_NS -> recdevs,1,Wind_to_R
+  "
+
+fit_assess_dsem_MS_regwind <- AssessDsem_fit(fit_type = "AssessDsem",
+                             fit_name = '_MS_regWind' ,
+                             ESPdata=ESPdata_MS,
+                             sem=sem_MS_regWind,
+                             sem_family =  rep('normal', ncol(ESPdata_MS)+1),
+                             family_sd = rep(0.1, ncol(ESPdata_MS)+1),
+                             ny_proj=ny_proj,
+                             Assess_recdevs= NULL,
+                             save_fit = FALSE,
+                             save.sdrep=TRUE)
+
+
+retrAD_real_MS_regWind <- retro_proj_analysis_AssessDsem(sem=sem_MS_regWind,
+                            fit=fit_assess_dsem_MS_regwind,
+                            peels=0:2,env_data = 'real',ny_proj = 3)
+
+
+``` 
+
+
+## Map simple 
+
+```{r}
+sem_MS_MapSpl = "
+  # link, lag, param_name, start_value
+
+  #internal data relation
+  Spr_SST -> Spr_SST,1,AR_SST
+  Wind_NS -> Wind_NS,1,AR_Wind
+  Sum_LCopepod_Shelikof -> Sum_LCopepod_Shelikof,1, AR_Cope
+  Sum_Euph_Kodiak -> Sum_Euph_Kodiak,1,AR_Euph
+  Spr_Larvae_Shelikof - > Spr_Larvae_Shelikof,1,AR_larvae
+  Sum_OffYOY_Cond_Shelikof -> Sum_OffYOY_Cond_Shelikof,1,AR_CondOffYOY
+  Sum_OffYOY_Shelikof -> Sum_OffYOY_Shelikof,1,AR_OffYOY
+  Sum_NearYOY_Kodiak -> Sum_NearYOY_Kodiak,1,AR_NearYOY
+  Sum_Juv_EuphDiet -> Sum_Juv_EuphDiet,1,AR_JuvEuphDiet
+  Fal_Adult_Cond_Fishery -> Fal_Adult_Cond_Fishery,1,AR_CondAd
+  recdevs <-> recdevs, 0, sigmaR, 1
+
+  #causal relation
+  #Sum_Euph_Kodiak -> Fal_Adult_Cond_Fishery, 0, Euph_to_CondAd 
+  #Fal_Adult_Cond_Fishery -> Spr_Larvae_Shelikof,1,CondAd_to_Larvae
+  Spr_SST -> Spr_Larvae_Shelikof,0,SST_to_Larvae
+  Wind_NS -> Spr_Larvae_Shelikof,0,Wind_to_Larvae
+  Spr_Larvae_Shelikof -> Sum_OffYOY_Shelikof,0,Larvae_to_OffYOY
+  #Spr_Larvae_Shelikof -> Sum_NearYOY_Kodiak,0,Larvae_to_NearYOY
+  Sum_OffYOY_Shelikof -> recdevs, 1, offYOY_to_R
+  #Sum_NearYOY_Kodiak -> recdevs, 1,nearYOY_to_R#,1
+  #Sum_LCopepod_Shelikof -> Sum_OffYOY_Cond_Shelikof,0,Cope_to_CondYOY
+  #Sum_Juv_EuphDiet -> Sum_OffYOY_Cond_Shelikof,0,JuvEuphDiet_to_CondYOY
+  Sum_OffYOY_Cond_Shelikof -> recdevs,1,CondYOY_to_R
+  "
+
+fit_assess_dsem_MS_MapSpl <- AssessDsem_fit(fit_type = "AssessDsem",
+                             fit_name = '_MS_MapSpl' ,
+                             ESPdata=ESPdata_MS,
+                             sem=sem_MS_MapSpl,
+                             sem_family =  rep('normal', ncol(ESPdata_MS)+1),
+                             family_sd = rep(0.1, ncol(ESPdata_MS)+1),
+                             ny_proj=ny_proj,
+                             Assess_recdevs= NULL,
+                             save_fit = FALSE,
+                             save.sdrep=TRUE)
+
+retrAD_real_MS_MapSpl <- retro_proj_analysis_AssessDsem(sem=sem_MS_MapSpl,
+                            fit=fit_assess_dsem_MS_MapSpl,
+                            peels=0:1,env_data = 'real',ny_proj = 3)
+
+
+
+causal_plot(fits = list(fit_assess_dsem_MS_MapSpl))
+rec_plot(fits = list(fit_assess_dsem_MS_MapSpl,fit_assess_dsem_DAG8simple),points=T)
+
+fit_assess_dsem_DAG8simple$sem_full %>% dim()
+fit_assess_dsem_MS_MapSpl$sem_full %>% dim()
+```
+
+## Map moderate
+
+```{r}
+
+# names(ESPdata_MS)
+sem_MS_MapMod = "
+  # link, lag, param_name, start_value
+
+  #internal data relation
+  Spr_SST -> Spr_SST,1,AR_SST
+  Wind_NS -> Wind_NS,1,AR_Wind
+  Sum_LCopepod_Shelikof -> Sum_LCopepod_Shelikof,1, AR_Cope
+  Sum_Euph_Kodiak -> Sum_Euph_Kodiak,1,AR_Euph
+  Spr_Larvae_Shelikof - > Spr_Larvae_Shelikof,1,AR_larvae
+  Sum_OffYOY_Cond_Shelikof -> Sum_OffYOY_Cond_Shelikof,1,AR_CondOffYOY
+  Sum_OffYOY_Shelikof -> Sum_OffYOY_Shelikof,1,AR_OffYOY
+  Sum_NearYOY_Kodiak -> Sum_NearYOY_Kodiak,1,AR_NearYOY
+  Sum_Juv_EuphDiet -> Sum_Juv_EuphDiet,1,AR_JuvEuphDiet
+  Fal_Adult_Cond_Fishery -> Fal_Adult_Cond_Fishery,1,AR_CondAd
+  recdevs <-> recdevs, 0, sigmaR, 1
+
+  #causal relation
+  Sum_Euph_Kodiak -> Fal_Adult_Cond_Fishery, 0, Euph_to_CondAd 
+  Fal_Adult_Cond_Fishery -> Spr_Larvae_Shelikof,1,CondAd_to_Larvae
+  #Spr_SST -> Spr_Larvae_Shelikof,0,SST_to_Larvae
+  Wind_NS -> Spr_Larvae_Shelikof,0,Wind_to_Larvae
+  Spr_Larvae_Shelikof -> Sum_OffYOY_Shelikof,0,Larvae_to_OffYOY
+  Sum_OffYOY_Shelikof <-> Sum_NearYOY_Kodiak,0,OffYOY_to_NearYOY
+  #Spr_SST -> Sum_OffYOY_Shelikof,0, SST_to_OffYOY
+  Sum_OffYOY_Shelikof -> recdevs, 1, offYOY_to_R
+  Spr_SST -> recdevs, 1,SST_to_R
+  Spr_SST -> Sum_OffYOY_Cond_Shelikof,0,SST_to_CondYOY
+  Sum_OffYOY_Cond_Shelikof -> recdevs,1,CondYOY_to_R
+  "
+
+fit_assess_dsem_MS_MapMod <- AssessDsem_fit(fit_type = "AssessDsem",
+                             fit_name = '_MS_MapMod' ,
+                             ESPdata=ESPdata_MS,
+                             sem=sem_MS_MapMod,
+                             sem_family =  rep('normal', ncol(ESPdata_MS)+1),
+                             family_sd = rep(0.1, ncol(ESPdata_MS)+1),
+                             ny_proj=ny_proj,
+                             Assess_recdevs= NULL,
+                             save_fit = FALSE,
+                             save.sdrep=TRUE)
+
+
+retrAD_real_MS_MapMod <- retro_proj_analysis_AssessDsem(sem=sem_MS_MapMod,
+                            fit=fit_assess_dsem_MS_MapMod,
+                            peels=0:10,env_data = 'real',ny_proj = 5)
+
+
+retrAD_real_MS_MapMod %>% length()
+skillpred_real_MS_MapMod <- unlist(retrAD_real_MS_MapMod,recursive = FALSE)
+length(skillpred_real_MS_MapMod)
+save(skillpred_real_MS_MapMod,file='skilltest_real_MS_MapMod.Rdata')
+```
+
+## Map complex
+
+```{r}
+
+sem_MS_MapCpl = "
+  # link, lag, param_name, start_value
+
+  #internal data relation
+  Spr_SST -> Spr_SST,1,AR_SST
+  Wind_NS -> Wind_NS,1,AR_Wind
+  Sum_LCopepod_Shelikof -> Sum_LCopepod_Shelikof,1, AR_Cope
+  Sum_Euph_Kodiak -> Sum_Euph_Kodiak,1,AR_Euph
+  Spr_Larvae_Shelikof - > Spr_Larvae_Shelikof,1,AR_larvae
+  Sum_OffYOY_Cond_Shelikof -> Sum_OffYOY_Cond_Shelikof,1,AR_CondOffYOY
+  Sum_OffYOY_Shelikof -> Sum_OffYOY_Shelikof,1,AR_OffYOY
+  Sum_NearYOY_Kodiak -> Sum_NearYOY_Kodiak,1,AR_NearYOY
+  Sum_Juv_EuphDiet -> Sum_Juv_EuphDiet,1,AR_JuvEuphDiet
+  Fal_Adult_Cond_Fishery -> Fal_Adult_Cond_Fishery,1,AR_CondAd
+  recdevs <-> recdevs, 0, sigmaR, 1
+
+  #causal relation
+  Sum_Euph_Kodiak -> Fal_Adult_Cond_Fishery, 0, Euph_to_CondAd 
+  Fal_Adult_Cond_Fishery -> Spr_Larvae_Shelikof,1,CondAd_to_Larvae
+  Spr_SST -> Spr_Larvae_Shelikof,0,SST_to_Larvae
+  Wind_NS -> Spr_Larvae_Shelikof,0,Wind_to_Larvae
+  Spr_Larvae_Shelikof -> Sum_OffYOY_Shelikof,0,Larvae_to_OffYOY
+  Spr_Larvae_Shelikof -> Sum_NearYOY_Kodiak,0,Larvae_to_NearYOY
+  Sum_OffYOY_Shelikof -> recdevs, 1, offYOY_to_R
+  Sum_NearYOY_Kodiak -> recdevs, 1,nearYOY_to_R#,1
+  Sum_LCopepod_Shelikof -> Sum_OffYOY_Cond_Shelikof,0,Cope_to_CondYOY
+  Sum_Juv_EuphDiet -> Sum_OffYOY_Cond_Shelikof,0,JuvEuphDiet_to_CondYOY
+  Sum_OffYOY_Cond_Shelikof -> recdevs,1,CondYOY_to_R
+  "
+
+
+fit_assess_dsem_MS_MapCpl <- AssessDsem_fit(fit_type = "AssessDsem",
+                             fit_name = '_MS_MapComplex' ,
+                             ESPdata=ESPdata_MS,
+                             sem=sem_MS_MapCpl,
+                             sem_family =  rep('normal', ncol(ESPdata_MS)+1),
+                             family_sd = rep(0.1, ncol(ESPdata_MS)+1),
+                             ny_proj=ny_proj,
+                             Assess_recdevs= NULL,
+                             save_fit = FALSE,
+                             save.sdrep=TRUE)
+
+
+retrAD_real_MS_MapCpl <- retro_proj_analysis_AssessDsem(sem=sem_MS_MapCpl,
+                            fit=fit_assess_dsem_MS_MapCpl,
+                            peels=0:10,env_data = 'real',ny_proj = 5)
+
+
+retrAD_real_MS_MapCpl %>% length()
+skillpred_real_MS_MapCpl <- unlist(retrAD_real_MS_MapCpl,recursive = FALSE)
+length(skillpred_real_MS_MapCpl)
+save(skillpred_real_MS_MapCpl,file='skilltest_real_MS_MapCpl.Rdata')
+```
+
+
+# Manuscript figures/tables
+
+## AIC
+
+```{r}
+
+purrr::map_dfr(list(fit_assess_dsem_MS_iid,fit_assess_dsem_MS_AR1,
+                    fit_assess_dsem_MS_regwind,fit_assess_dsem_MS_MapSpl,
+                    fit_assess_dsem_MS_MapMod,fit_assess_dsem_MS_MapCpl),
+               function(x){data.frame(name=x$version,npar=length(x$opt$par),
+                                      nll=round(x$opt$objective,0),
+                                      AIC=round(x$opt$AIC,0))})%>% 
+  mutate(deltaAIC=AIC-min(AIC))
+```
+
+## sigma R
+
+```{r}
+purrr::map_dfr(list(fit_assess_dsem_MS_iid,
+                    #fit_assess_dsem_MS_AR1, #don't have a simple way to get it for AR1 for now
+                    fit_assess_dsem_MS_regwind,
+                    fit_assess_dsem_MS_MapSpl,
+                    fit_assess_dsem_MS_MapMod,fit_assess_dsem_MS_MapCpl),
+       function(x){as_fitted_DAG_assessdsem(x,which.link = 'all',out.type = 'df') %>% 
+                   select(name,Estimate) %>% mutate(model=x$version)}) %>% 
+  filter(name=='sigmaR')
+
+
+
+# as_fitted_DAG_assessdsem(fit_assess_dsem_MS_MapCpl,which.link = 'all',out.type = 'df')
+```
+
