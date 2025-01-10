@@ -11,6 +11,7 @@ source/*.htp
 source/*.cll
 source/*.o
 source/*.dll
+source/*.RDS
 .Rproj.user
 .Rhistory
 tests/model_20_8
@@ -33,3 +34,5 @@ TMB/Selectivity_runs.RData
 tests/model_23
 data/*.o
 data/*.dll
+runs/old
+runs/*RData
