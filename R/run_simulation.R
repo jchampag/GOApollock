@@ -3,22 +3,28 @@
 
 # Juliette started 4/3/24
 ###########################
+setwd('C:/Users/jchampag/Documents/Github/GOApollock')
 
 library(TMB)
+## devtools::install_github("James-Thorson-NOAA/dsem", ref='dev')
+## devtools::install_github("Cole-Monnahan-NOAA/dsem", ref='simulate_NAs')
 library(dsem)
 library(ggplot2)
 library(dplyr)
 ## devtools::install_github("afsc-assessments/GOApollock", ref='dev')
-# devtools::install_github("jchampag/GOApollock", ref='dev')
+# devtools::install_github("jchampag/GOApollock", ref='dsem')
 library(GOApollock)
 library(readxl)
 # theme_set(theme_bw())
-library(phylopath)
-library(ggpubr)
-library(reshape)
+# library(phylopath)
+# library(ggpubr)
+# library(reshape)
 library(gridExtra)
-source("AssessDsem_fns.R")
+library(purrr)
+source("R/AssessDsem_fns.R")
 
+# compile('source/goa_pk_dsem.cpp')
+# dyn.load(dynlib('source/goa_pk_dsem'))
 #--------------------------------------------------------------------------------#
 ###### WITH PARALLEL AND PARLAPPLY - not working ####
 #--------------------------------------------------------------------------------#
@@ -114,94 +120,181 @@ source("AssessDsem_fns.R")
 ######## WITH FOREACH ########
 #--------------------------------------------------------#
 
-start_time <- Sys.time()
 
-install.packages("doSNOW")
-install.packages("doParallel")
-install.packages("doMPI")
+
+# install.packages("doSNOW")
+# install.packages("doParallel")
+# install.packages("doMPI")
 
 library(doParallel)
 library(foreach)
-registerDoParallel(cl <- makeCluster(2))
-results_list <- foreach(i = 1:2) %dopar% {
 
-  simss <- simulate_AssessDsem(sem=sem_MS_MapMod,fit_assess_dsem =fit_assess_dsem_MS_MapMod,
-                               family= family <- rep('normal',ncol(ESPdata_DAG1_rec)),
-                               nsims = 1,fit_sim=FALSE,simverbose = FALSE,seed=i,
+load('runs/fit_MS_MapMod.Rdata')
+fit <- fit_assess_dsem_MS_MapMod
+fit$path <- fit$input$path <-  "source"
+parallel::detectCores()
+
+ncores= 30
+
+start_time <- Sys.time()
+registerDoParallel(cl <- makeCluster(ncores))
+results_list <- foreach(i = 1:ncores,.errorhandling = 'pass') %dopar% {
+
+  library(dsem)
+  library(GOApollock)
+  source("R/AssessDsem_fns.R")
+  simss <- simulate_AssessDsem(sem=fit$sem,fit_assess_dsem =fit,
+                               family= rep('normal',ncol(fit$input$dat$y_tj)),
+                               nsims = 20,fit_sim=TRUE,simverbose = FALSE,seed=30+i,
                                dsem_sim_control=list(resimulate_gmrf=TRUE,variance='none',ignoreNAs=FALSE))
 
   simss
 
 }
+
+results_list_noNA <- foreach(i = 1:ncores,.errorhandling = 'pass') %dopar% {
+  
+  library(dsem)
+  library(GOApollock)
+  source("R/AssessDsem_fns.R")
+  simss <- simulate_AssessDsem(sem=fit$sem,fit_assess_dsem =fit,
+                               family= rep('normal',ncol(fit$input$dat$y_tj)),
+                               nsims = 20,fit_sim=TRUE,simverbose = FALSE,seed=30+i,
+                               dsem_sim_control=list(resimulate_gmrf=TRUE,variance='none',ignoreNAs=TRUE))
+  
+  simss
+  
+}
+
 stopCluster(cl)
-
-
 end_time <- Sys.time()
 print(end_time - start_time)
 
 
+simu
+
+save(simu,file='runs/selftest_MapMod_noNAs.Rdata')
+# results_list_NA <- results_list
 #-----------------------------------#
 ##### POST SIMULATON ANALYSIS #######
 #-----------------------------------#
-
+load('runs/selftest_MapMod.Rdata')
+onelist <- unlist(results_list_NA,recursive = F)
+twolist <- unlist(results_list,recursive = F)
+onetwolist <- list(onelist,twolist)
+simu <- unlist(results_list_noNA,recursive = F) #results_list_noNA
+length(simu)
+which(names(simu)!='')
+simu <- discard_at(simu,which(names(simu)!=''))#c(56,57)
+length(simu)
 
 ### Check cv
 
-purrr::map_dfr(simu10,function(x){list(sim=x$version,max_grad=x$opt$max_gradient)})
-get_std(simu10) %>% filter(is.na(est),is.na(se))
+purrr::map_dfr(simu,function(x){data.frame(sim=x$version,max_grad=x$opt$max_gradient)})
+purrr::map_dfr(simu,function(x){data.frame(sim=x$version,max_grad=x$opt$max_gradient)}) %>% filter(max_grad>0.1) %>% nrow()
+bad_grad <- purrr::map_dfr(simu,function(x){list(sim=x$version,max_grad=x$opt$max_gradient)}) %>% filter(max_grad>0.1) %>% pull(sim)
+get_std(simu) %>% filter(is.na(est))
+bad_se <- get_std(simu) %>% filter(is.na(se)) %>% pull(version) %>% as.character() %>% unique()
 
-sim30 <- list(simu20,simu10)
-simu30 <- unlist(sim30,recursive = FALSE)
-simu10[[2]]$version
+length(bad_grad);length(bad_se)
+match(bad_se,bad_grad);match(bad_grad,bad_se)
 
-for(i in 1:10){
-  simu10[[i]]$version <- 20+i
-  simu10[[i]]$sd$version <- (20+i)
-}
+# sim_names <- purrr::map_vec(simu,function(x){x$version})
+# sim_names[!sim_names %in%bad_se] %>% length()
+N = length(simu)-length(bad_se);N
 
+## RE for Parameters (FE)
 
-
-### Plot results
-
-#### Parameters (FE)
-
-
-sem_full<- fit_assess_dsem_DAG8_simple_2SSTdarrow_sd0.1$sem_full %>% as.data.frame()
-get_std(fits=simu30) %>%
-  filter(name %in%c('mean_log_recruit','beta_z')) %>%
-  mutate(type='re-estimated',
-         name2=rep(c('mean_log_recruit',sem_full$name),length(simu30))) %>% select(name2,year,version,type,est) %>%
-
-  #add true (initially estimated) values
-  bind_rows(data.frame(name2='mean_log_recruit',year=1970,
-                       est=fit_assess_dsem_DAG8_simple_2SSTdarrow_sd0.1$parList$mean_log_recruit,
-                       type='true')) %>%
-  bind_rows(data.frame(name2=sem_full$name,
-                       year=1970:(1970+length(fit_assess_dsem_DAG8_simple_2SSTdarrow_sd0.1$parList$beta_z)-1),
-                       est=fit_assess_dsem_DAG8_simple_2SSTdarrow_sd0.1$parList$beta_z,
-                       type='true')) %>%
-
-  #compute RE
-  group_by(year,name2) %>%
-  mutate(RE=(est-est[which(type=='true')])/est[which(type=='true')]) %>%
-
-  filter(type=='re-estimated') %>%
-  # filter(!version%in%bad_grad) %>% #pull(version) %>% unique()
-  #improve dsem par name
-  mutate(par_type=ifelse(name2=='mean_log_recruit','assessement','dsem')) %>%
-  filter(name2 %in% c('AR_JuvEuphDiet')) %>%
-
-  ggplot(aes(x=name2,y=RE,group=name2,fill=par_type))+
+parplot <- purrr::map_dfr(simu,function(x){as.data.frame(fit$sem_full) %>% 
+    mutate(est=x$parList$beta_z,true=fit$parList$beta_z,sim=x$version) %>% #type='selftest',
+    select(c(name,lag,first,second,est,true,sim)) %>% 
+    bind_rows(data.frame(name='mean_log_recruit',#lag=NA,first=NA,second=
+                         est=x$parList$mean_log_recruit,true=fit$parList$mean_log_recruit,
+                         sim=x$version))}) %>%
+  filter(est!=0) %>%
+  filter(!sim%in%bad_se) %>% 
+  mutate(RE=(est-true)/true) %>% 
+  ggplot(aes(x=name,y=RE,group=name))+#fill=par_type
   # geom_point(aes(x=name2,y=RE,group=name2,col=version))+
   geom_boxplot()+
   geom_hline(yintercept=0)+
   theme(legend.position = 'bottom',
-        axis.text.x =element_text(angle=45))
-# facet_wrap(~par_type,ncol=1)#,scale='free_y')
+        axis.text.x =element_text(angle=45))+ #coord_flip()+
+  labs(y='Relative error',x="Parameter names")
+    #title=paste0('N=',N,' resimulatedGMRF=',simu[[1]]$DSEM_simu_settings$resimulate_gmrf,
+    #                ' variance=',simu[[1]]$DSEM_simu_settings$variance,' fillNA=',simu[[1]]$DSEM_simu_settings$ignoreNAs))
 
-get_std(fits=simu20) %>%
-  filter(name %in%c('mean_log_recruit','beta_z')) %>%
-  mutate(type='re-estimated',
-         name2=rep(c('mean_log_recruit',sem_full$name),length(simu20))) %>% select(name2,year,version,type,est) %>%
-  filter(name2=='AR_JuvEuphDiet') %>% summary()
+### RE for quantities
 
+qplot <- purrr::map_dfr(simu,function(x){data.frame(what='Recruitment',year=x$rep$years,est=x$rep$recruit,true=x$simu_int_dsem$recruit) %>% 
+    bind_rows(data.frame(what='SSB',year=x$rep$years,est=x$rep$Espawnbio,true=x$simu_int_dsem$Espawnbio)) %>% 
+    bind_rows(data.frame(what='Catch',year=x$rep$years,est=x$rep$Ecattot,true=x$simu_int_dsem$Ecattot)) %>% 
+    mutate(sim=x$version)}) %>%
+  # filter(est!=0) %>% 
+  filter(!sim%in%bad_se) %>% 
+  mutate(RE=(est-true)/true) %>% 
+  ggplot(aes(x=year,y=RE,group=year))+facet_wrap(~what,ncol=1,scale='free_y')+
+  # geom_point(aes(x=name2,y=RE,group=name2,col=version))+
+  geom_boxplot()+#outlier.shape = NA
+  # scale_y_continuous(limits=c(0,30))+#quantile(RE, c(0.1, 0.9)))+
+  # gg.layers::geom_boxplot2(width.errorbar = 0.5)+
+  geom_hline(yintercept=0)+
+  # theme(legend.position = 'bottom',
+  #       axis.text.x =element_text(angle=45))+
+  labs(y='Relative error',x="Year")
+# title=paste0('N=',N,' resimulatedGMRF=',simu[[1]]$DSEM_simu_settings$resimulate_gmrf,
+#                     ' variance=',simu[[1]]$DSEM_simu_settings$variance,' fillNA=',simu[[1]]$DSEM_simu_settings$ignoreNAs))
+
+
+## Compose a plot w parameter and quatites RE
+ggpubr::ggarrange(plotlist = list(parplot,qplot), nrow=2,ncol = 1)
+
+## RE for Rec
+
+purrr::map_dfr(simu,function(x){data.frame(what='Recruitment',year=x$rep$years,est=x$rep$recruit,true=x$simu_int_dsem$recruit)%>% #fit$rep$recruit,
+    mutate(sim=x$version)}) %>%
+  # filter(est!=0) %>% 
+  filter(!sim%in%bad_se) %>% 
+  mutate(RE=(est-true)/true) %>% 
+  ggplot(aes(x=year,y=RE,group=year))+
+  geom_boxplot()+ #outlier.shape = NA
+  # scale_y_c#ontinuous(limits=c(0,40))+
+  geom_hline(yintercept=0)+
+  theme(legend.position = 'bottom',
+        axis.text.x =element_text(angle=45))+
+  labs(title=paste0('Recruitment - N=',N,' resimulatedGMRF=',simu[[1]]$DSEM_simu_settings$resimulate_gmrf,
+                    ' variance=',simu[[1]]$DSEM_simu_settings$variance,' fillNA=',simu[[1]]$DSEM_simu_settings$ignoreNAs))
+
+
+## RE for Catch
+
+purrr::map_dfr(simu,function(x){data.frame(what='Catch',year=x$rep$years,est=x$rep$Ecattot,true=x$simu_int_dsem$Ecattot)%>% 
+    mutate(sim=x$version)}) %>%
+  # filter(est!=0) %>% 
+  filter(!sim%in%bad_se) %>% 
+  mutate(RE=(est-true)/true) %>% 
+  ggplot(aes(x=year,y=RE,group=year))+
+  geom_boxplot()+ #outlier.shape = NA
+  # scale_y_continuous(limits=c(0,20))+
+  geom_hline(yintercept=0)+
+  theme(legend.position = 'bottom',
+        axis.text.x =element_text(angle=45))+
+  labs(title=paste0('Catch - N=',N,' resimulatedGMRF=',simu[[1]]$DSEM_simu_settings$resimulate_gmrf,
+                    ' variance=',simu[[1]]$DSEM_simu_settings$variance,' fillNA=',simu[[1]]$DSEM_simu_settings$ignoreNAs))
+
+
+## RE for SSB
+
+purrr::map_dfr(simu,function(x){data.frame(what='SSB',year=x$rep$years,est=x$rep$Espawnbio,true=x$simu_int_dsem$Espawnbio)%>% 
+    mutate(sim=x$version)}) %>%
+  # filter(est!=0) %>% 
+  filter(!sim%in%bad_se) %>% 
+  mutate(RE=(est-true)/true) %>% 
+  ggplot(aes(x=year,y=RE,group=year))+
+  geom_boxplot()+ #outlier.shape = NA
+  # scale_y_continuous(limits=c(0,5))+
+  geom_hline(yintercept=0)+
+  theme(legend.position = 'bottom',
+        axis.text.x =element_text(angle=45))+
+  labs(title=paste0('SSB - N=',N,' resimulatedGMRF=',simu[[1]]$DSEM_simu_settings$resimulate_gmrf,
+                    ' variance=',simu[[1]]$DSEM_simu_settings$variance,' fillNA=',simu[[1]]$DSEM_simu_settings$ignoreNAs))
