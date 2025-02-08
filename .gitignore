@@ -35,4 +35,4 @@ tests/model_23
 data/*.o
 data/*.dll
 runs/old
-runs/*RData
+runs/*.RData
