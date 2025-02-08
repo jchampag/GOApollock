@@ -508,8 +508,7 @@
     ylim(0,maxval_var)+
     coord_flip()+theme(legend.position='none')
 
-  plt <- ggarrange(plt1,plt2,plt3,ncol=3)#grid.arrange
-  if(what=='all'){return(plt)}
+  if(what=='all'){plt <- ggarrange(plt1,plt2,plt3,ncol=3);return(plt)}
   else if(what== 'causal'){return(plt1+theme(legend.position='bottom'))}
   else if(what== 'AR1'){return(plt2)}
   else if(what== 'variance'){return(plt3+theme(legend.position='bottom'))}
@@ -598,7 +597,7 @@
                                      'Fal_Adult_Cond_Fishery','Spr_SST','Wind_NS'))) %>%
     ggplot()+geom_point(aes(year,data),col='black')+
     geom_line(aes(year,est,col=version,group=version))+
-    facet_wrap(~name)+
+    facet_wrap(~name,scale='free_y')+#
     theme(legend.position = 'bottom')+
     labs(y='Time series',x='Year')
 
