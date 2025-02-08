@@ -686,7 +686,6 @@
                                   fit_sim=TRUE,seed=5){
 
   start_time <- Sys.time()
-  set.seed(seed)
   re_fit_assess_dsem <- list()
   ### Simulation step 1: fit + simulate external dsem ---------
 
@@ -716,6 +715,7 @@
                            full = TRUE)
 
   for(i in 1:nsims){
+    set.seed(i)
     ### Simulation step 2: build a intDsem obj + simulate -----------
 
     #create a new input object
