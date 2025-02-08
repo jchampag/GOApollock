@@ -741,7 +741,7 @@
 
     #create another input object
     input_int_dsem4fit <- fit_assess_dsem$input
-    input_int_dsem4fit$version <- i
+    input_int_dsem4fit$version <- paste0(fit_assess_dsem$version,'_seed_',seed,'_rep_',i)
 
     #stack the simulated data in this input object
     for (x in 1:length( input_int_dsem4fit$dat)){
@@ -764,6 +764,7 @@
     #add sim data
     re_fit_assess_dsem[[i]]$simu_int_dsem <-  sim_int_dsem
     re_fit_assess_dsem[[i]]$simu_ext_dsem <- sim_ext_dsem[[i]]
+    re_fit_assess_dsem[[i]]$DSEM_simu_settings <- dsem_sim_control
     # re_fit_assess_dsem[[i]]$simu <- c(sim_ext_dsem,sim_int_dsem)
     #if the model has not be fitted, add manually some slot usefull
     if(!fit_sim){
