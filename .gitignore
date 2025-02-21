@@ -36,3 +36,6 @@ data/*.o
 data/*.dll
 runs/old
 runs/*.RData
+#data 
+data/2023/*.csv
+data/2023/*.xlsx
