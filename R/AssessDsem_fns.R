@@ -35,6 +35,8 @@
                              Assess_recdevs= NULL, #if ExtDsem it it requiered to have it
                              save_fit = TRUE,
                              Rdsem=TRUE,
+                             src_path='../source',
+                             data_path='../data/2023/',
                              ...
 ){
   #some warnings
@@ -43,10 +45,10 @@
 
   if(fit_type != 'ExtDsem'){ #if AssessOnly or AssessDsem need to do Assess stuff
 
-    input_assess <- prepare_pk_input(path='../source',
+    input_assess <- prepare_pk_input(path=data_path,
                                      modfile=ifelse(fit_type=='AssessOnly','goa_pk_tmb','goa_pk_dsem'),
-                                     datfile='../data/2023/pk23_10.txt', version=paste0(fit_type,fit_name))
-
+                                     datfile='pk23_10.txt', version=paste0(fit_type,fit_name))
+    input_assess$path <- src_path
     input_assess$dat$Ftarget <- rep(input_assess$dat$Ftarget[1],ny_proj) #/!
 
     # decreasing influence of spawner survey
@@ -110,6 +112,15 @@
       #map
       input_assessDsem$map$lnsigma_j <- factor(rep(NA, length=length(input_assessDsem$pars$lnsigma_j)))
     }
+    ## HARDCODING OF SOME AR PAR TO 0 -> to improve later
+    print("WARNING the estimation of some AR1 is fixed internally - to change if you don't want it")
+    ids <-  as.data.frame(fit_dsem$sem_full)
+    id_fix <- which(ids$name %in% c('AR_OffYOY','AR_NearYOY','AR_JuvEuphDiet'))
+    if(is.null(input_assessDsem$map$beta_z))input_assessDsem$map$beta_z <- 1:length(input_assessDsem$pars$beta_z )
+    input_assessDsem$map$beta_z[id_fix] <- NA
+    input_assessDsem$map$beta_z <- as.factor(input_assessDsem$map$beta_z)
+    input_assessDsem$pars$beta_z[id_fix] <- 0
+
     if(!Rdsem){
       ids <-  as.data.frame(fit_dsem$sem_full)
       id_Rlink <- which(ids$first!=ids$second & ids$second=='recdevs')
@@ -229,7 +240,10 @@
 #                                         lag = c(0,1), direction = c(1,2),
 #                                         what = "p_value",which.link='all',
 #                                         out.type="matrix")
-#
+# as_fitted_DAG_assessdsem(fit_assess_dsem_DAG8noupperCondnoNearYOYnoRlink)
+# as_fitted_DAG_assessdsem(fit_assess_dsem_DAG8noupperCondnoNearYOY)
+# plot(as_fitted_DAG_assessdsem(fit_assess_dsem_DAG8noupperCondnoNearYOYnoRlink,what='p_value'))
+# plot(as_fitted_DAG_assessdsem(fit_assess_dsem_DAG8noupperCondnoNearYOYnoRlink))
 #--------------------------------------------------------------------------#
 
 #Improvements to think of : none for now
@@ -595,6 +609,10 @@
                                      'Sum_NearYOY_Kodiak','Sum_Euph_Kodiak','Sum_LCopepod_Shelikof',
                                      'Sum_Juv_EuphDiet','Sum_OffYOY_Cond',
                                      'Fal_Adult_Cond_Fishery','Spr_SST','Wind_NS'))) %>%
+    #filter(!name%in%c('Sum_LCopepod_Shelikof','Sum_Juv_EuphDiet',"recdevs")) %>% #"recdevs" ='Recruitment_deviation'
+    # mutate(name=recode_factor(name,'Spr_SST'='Spring_SST','Fal_Adult_Cond_Fishery'='Adult_Condition','Spr_Larvae_Shelikof'='Larvae',
+    #                               'Sum_OffYOY_Shelikof'='Offshore_YOY','Sum_Euph_Kodiak'='Euphausiids','Sum_OffYOY_Cond'='OffYOY_Condition','Sum_NearYOY_Kodiak'='Nearshore_YOY')) %>%
+    # filter(name %in% c('Spr_SST')) %>%
     ggplot()+geom_point(aes(year,data),col='black')+
     geom_line(aes(year,est,col=version,group=version))+
     facet_wrap(~name,scale='free_y')+#
@@ -692,6 +710,7 @@
   # built objects we need for a dsem fit
   ext_dsem_data <- fit_assess_dsem$input$dat$y_tj
   # ext_dsem_data[1:nrow(ext_dsem_data),1] <- fit_assess_dsem$sd %>% filter(name =='x_tj') %>%
+  #   filter(year<(fit_assess_dsem$input$dat$styr+nrow(ext_dsem_data))) %>% pull(est)
 
   ext_dsem_par = fit_assess_dsem$parList[c("beta_z","lnsigma_j","mu_j","delta0_j","x_tj")]
   ext_dsem_map = fit_assess_dsem$input$map[c("x_tj","lnsigma_j","mu_j")]
@@ -757,7 +776,7 @@
     # input_int_dsem4fit$path <-'source'
     re_fit_assess_dsem[[i]] <- suppressMessages(fit_pk(input=input_int_dsem4fit,newtonsteps=2,
                                                        do.fit=fit_sim,filename = NULL,
-                                                       control=list(trace=0),verbose=FALSE,
+                                                       control=list(trace=0),#verbose=FALSE,
                                                        save.sdrep = FALSE,getsd=TRUE))#can probably be turn to false
 
     #add sim data
@@ -913,12 +932,15 @@
 #' @export
 
 # fit = fit_assess_dsem_DAG1_sd0.1
+#fit =fit_assess_dsem_DAG1_sd0.1_noRlink2
 # fit$path <-'source'
 # fit$input$path <-'source'
+# env_data = 'realistic'
 # retros2 <- retro_proj_analysis_AssessDsem(sem=sem_DAG1noRlink,
 #                                fit=fit,peels=0:10,ny_proj = 3,env_data = 'idealistic')
-# retros <- retro_proj_analysis_AssessDsem(sem=sem_DAG1,
+# retrostryopp <- retro_proj_analysis_AssessDsem(sem=sem_DAG1,
 #                                           fit=fit,peels=0:1,ny_proj = 3,env_data = 'idealistic')
+#=TRUE
 
 'retro_proj_analysis_AssessDsem' <- function(reps=1,sem,fit,peels=0:2,ny_proj=3,
                                              env_data='idealistic',fit_w_and_wo_Rlink,...){
@@ -936,7 +958,7 @@
     #trick for a stronger sigmaR
     # ids <-  as.data.frame(fit$sem_full)
     # id_Rsigma <- which(ids$name=='sigmaR')
-    # fit$parList$beta_z[id_Rsigma] <- .1
+    # fit$parList$beta_z[id_Rsigma] <- .2
     sim <- suppressMessages(simulate_AssessDsem(sem=sem,fit_assess_dsem =fit,family= family <- rep('normal',ncol(ESPdata_DAG1_rec)),
                         nsims = 1,fit_sim=FALSE,simverbose = FALSE,seed=seed,
                         dsem_sim_control=list(resimulate_gmrf=TRUE,variance='none',
@@ -975,6 +997,7 @@
 #' Internal wraper: Fit 1 extDsem models with peeled data set + project based on it
 #'
 #' @export
+#' fit_w_and_wo_Rlink
 
 
 'fit_retro_proj_AssessDsem' <- function(sem,fit_assess_dsem,peel,ny_proj=3,reps=1,
