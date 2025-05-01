@@ -700,24 +700,24 @@ Type objective_function<Type>::operator() ()
   //REPORT(IminusRho_kk_bis);
 
   // NOT SPARSE
-  matrix<Type>I_kk_bis_nsp( n_k, n_k );
-  I_kk_bis_nsp.setIdentity();
+  //matrix<Type>I_kk_bis_nsp( n_k, n_k );
+  //I_kk_bis_nsp.setIdentity();
 
-  matrix<Type>IminusRho_kk_bis_nsp( n_k, n_k );
-  IminusRho_kk_bis_nsp.setZero();
-  IminusRho_kk_bis_nsp = I_kk_bis_nsp - Rho_kk;
+  //matrix<Type>IminusRho_kk_bis_nsp( n_k, n_k );
+  //IminusRho_kk_bis_nsp.setZero();
+  //IminusRho_kk_bis_nsp = I_kk_bis_nsp - Rho_kk;
 
-  matrix<Type> TE_kk_nsp( n_k, n_k );
-  TE_kk_nsp.setZero();
-  TE_kk_nsp=atomic::matinv(IminusRho_kk_bis_nsp);
+  //matrix<Type> TE_kk_nsp( n_k, n_k );
+  //TE_kk_nsp.setZero();
+  //TE_kk_nsp=atomic::matinv(IminusRho_kk_bis_nsp);
 
-  REPORT(TE_kk_nsp);
+  //REPORT(TE_kk_nsp);
   //REPORT(IminusRho_kk_bis_nsp);
 
   // Extract effect on recdevs
-  vector<Type> eff;
-  eff = TE_kk_nsp.row(n_t-1);
-  ADREPORT(eff);
+  //vector<Type> eff;
+  //eff = TE_kk_nsp.row(n_t-1);
+  //ADREPORT(eff);
 
   // Extract effect on recdevs
   //matrix<Type> effect(n_j);
